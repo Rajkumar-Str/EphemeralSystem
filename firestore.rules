@@ -1,0 +1,27 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Main app data namespace used by chats and profile.
+    match /artifacts/{appId}/users/{userId}/{document=**} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // Legacy profile path kept for backward compatibility reads/writes.
+    match /profiles/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // Deny everything else.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase-config';
@@ -29,6 +29,8 @@ type ConfirmedFields = Partial<Record<ProfileField, boolean>>;
 const PROFILE_USER_KEY = 'ephemeral_profile_user';
 const PROFILE_DETAILS_KEY = 'ephemeral_profile_details';
 const PROFILE_CONFIRMED_FIELDS_KEY = 'ephemeral_profile_confirmed_fields';
+const PROFILE_ARTIFACT_APP_ID = 'default-app-id';
+const PROFILE_DOC_ID = 'main';
 
 const confirmationRequiredFields: ProfileField[] = [
   'displayName',
@@ -142,6 +144,20 @@ function profileCompletion(details: ProfileDetails, confirmedFields: ConfirmedFi
   return Math.round(((confirmedCount + textareaCount) / totalFields) * 100);
 }
 
+function mapFirestoreSyncError(error: unknown, fallbackMessage: string): string {
+  const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
+  if (code.includes('failed-precondition')) {
+    return 'Firestore is not enabled yet for this project. Create Firestore Database in Firebase Console.';
+  }
+  if (code.includes('permission-denied')) {
+    return 'Cloud sync is blocked by Firestore rules. Allow this user to read/write their own profile.';
+  }
+  if (code.includes('unavailable')) {
+    return 'Cloud sync temporarily unavailable. Changes are saved on this device.';
+  }
+  return fallbackMessage;
+}
+
 export default function ProfilePage() {
   const initialProfile = useMemo(() => {
     if (typeof window === 'undefined') return { email: '', uid: '' };
@@ -189,8 +205,20 @@ export default function ProfilePage() {
         }
         const loadRemoteProfile = async () => {
           try {
-            const profileRef = doc(db, 'profiles', user.uid);
-            const snapshot = await getDoc(profileRef);
+            const primaryProfileRef = doc(
+              db,
+              'artifacts',
+              PROFILE_ARTIFACT_APP_ID,
+              'users',
+              user.uid,
+              'profile',
+              PROFILE_DOC_ID
+            );
+            const legacyProfileRef = doc(db, 'profiles', user.uid);
+            let snapshot = await getDoc(primaryProfileRef);
+            if (!snapshot.exists()) {
+              snapshot = await getDoc(legacyProfileRef);
+            }
             if (!isMounted) return;
             if (snapshot.exists()) {
               const data = snapshot.data();
@@ -208,7 +236,9 @@ export default function ProfilePage() {
           } catch (error) {
             if (isMounted) {
               console.error('Failed to load profile from Firestore:', error);
-              setCloudSyncError('Cloud sync unavailable right now. Using local profile data.');
+              setCloudSyncError(
+                mapFirestoreSyncError(error, 'Cloud sync unavailable right now. Using local profile data.')
+              );
             }
           } finally {
             if (isMounted) {
@@ -244,8 +274,17 @@ export default function ProfilePage() {
     const timeout = window.setTimeout(() => {
       const syncProfile = async () => {
         try {
+          const profileRef = doc(
+            db,
+            'artifacts',
+            PROFILE_ARTIFACT_APP_ID,
+            'users',
+            uid,
+            'profile',
+            PROFILE_DOC_ID
+          );
           await setDoc(
-            doc(db, 'profiles', uid),
+            profileRef,
             {
               email,
               details,
@@ -257,7 +296,9 @@ export default function ProfilePage() {
           setCloudSyncError('');
         } catch (error) {
           console.error('Failed to save profile to Firestore:', error);
-          setCloudSyncError('Cloud sync unavailable right now. Changes are saved on this device.');
+          setCloudSyncError(
+            mapFirestoreSyncError(error, 'Cloud sync unavailable right now. Changes are saved on this device.')
+          );
         }
       };
 
@@ -328,7 +369,7 @@ export default function ProfilePage() {
               : 'border-[#3a311f] bg-[#0f0c07] text-[#5f5646]'
         }`}
       >
-        ✓
+        {'\u2713'}
       </button>
     );
   };
