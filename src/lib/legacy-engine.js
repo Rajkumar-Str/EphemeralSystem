@@ -25,6 +25,9 @@ export function initLegacyEngine() {
             const cinematicTooltip = document.getElementById('cinematic-tooltip');
             
             const apiKey = "API_KEY_PLACEHOLDER"; 
+            const NORMAL_CHAT_MODEL = "gemini-3.1-flash-lite-preview";
+            const WEB_GROUNDED_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+            const ENABLE_MAP_GROUNDING = false;
             const fallbackFirebaseConfig = {
                 apiKey: "API_KEY_PLACEHOLDER",
                 authDomain: "FIREBASE_AUTH_DOMAIN_PLACEHOLDER",
@@ -817,6 +820,7 @@ export function initLegacyEngine() {
             async function callGeminiAPI(query, options = {}) {
                 const useWebGrounding = !!options.useWebGrounding;
                 const shouldUpdateWebSnapshot = !!options.shouldUpdateWebSnapshot;
+                const candidateModels = useWebGrounding ? WEB_GROUNDED_MODELS : [NORMAL_CHAT_MODEL];
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
                 
                 // CRITICAL FIX: Grab the live local date and time from the browser
@@ -835,37 +839,60 @@ export function initLegacyEngine() {
                     systemInstruction: { parts: [{ text: aiInstruction }] }
                 };
                 if (useWebGrounding) {
+                    // Keep map grounding explicitly disabled for now.
                     payload.tools = [{ google_search: {} }];
-                }
-                
-                let retries = 0;
-                while (retries <= 5) {
-                    try {
-                        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload)
-                        });
-                        if (!res.ok) throw new Error();
-                        const result = await res.json();
-                        const topCandidate = result.candidates?.[0] || {};
-                        const textParts = topCandidate?.content?.parts?.map(part => part?.text || '').filter(Boolean) || [];
-                        const aiText = (textParts.join('') || "The void remains.").trim();
-                        conversationHistory.push({ role: "model", parts: [{ text: aiText }] });
-                        if (useWebGrounding && shouldUpdateWebSnapshot) {
-                            updateWebSnapshot(query, aiText, topCandidate?.groundingMetadata);
-                        }
-                        
-                        // Fire off the background save to Archives
-                        if (window.saveToArchive) {
-                            window.saveToArchive().catch(e => console.error(e));
-                        }
-                        
-                        return aiText;
-                    } catch (e) { 
-                        await new Promise(r => setTimeout(r, [1000, 2000, 4000, 8000, 16000][retries++])); 
+                    if (ENABLE_MAP_GROUNDING) {
+                        payload.tools.push({ google_maps: {} });
                     }
                 }
+
+                let lastStatusCode = 0;
+                
+                for (const modelId of candidateModels) {
+                    let retries = 0;
+                    while (retries <= 5) {
+                        try {
+                            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload)
+                            });
+                            if (!res.ok) {
+                                lastStatusCode = res.status;
+                                if (res.status === 429) {
+                                    break;
+                                }
+                                throw new Error(`HTTP ${res.status}`);
+                            }
+                            const result = await res.json();
+                            const topCandidate = result.candidates?.[0] || {};
+                            const textParts = topCandidate?.content?.parts?.map(part => part?.text || '').filter(Boolean) || [];
+                            const aiText = (textParts.join('') || "The void remains.").trim();
+                            conversationHistory.push({ role: "model", parts: [{ text: aiText }] });
+                            if (useWebGrounding && shouldUpdateWebSnapshot) {
+                                updateWebSnapshot(query, aiText, topCandidate?.groundingMetadata);
+                            }
+                            
+                            // Fire off the background save to Archives
+                            if (window.saveToArchive) {
+                                window.saveToArchive().catch(e => console.error(e));
+                            }
+                            
+                            return aiText;
+                        } catch (e) { 
+                            await new Promise(r => setTimeout(r, [1000, 2000, 4000, 8000, 16000][retries++])); 
+                        }
+                    }
+                }
+                
+                if (useWebGrounding) {
+                    const webFallbackText = lastStatusCode === 429
+                        ? "Live web lookup hit Gemini 2.5 free-tier limits right now. Wait for quota reset, or continue with normal chat."
+                        : "Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.";
+                    conversationHistory.push({ role: "model", parts: [{ text: webFallbackText }] });
+                    return webFallbackText;
+                }
+
                 return "The void remains.";
             }
 

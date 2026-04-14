@@ -1,4 +1,5 @@
 export const GEMINI_API_KEY = "API_KEY_PLACEHOLDER";
+export const DEFAULT_TEXT_MODEL = "gemini-3.1-flash-lite-preview";
 
 export const personas = {
   system: { 
@@ -29,7 +30,7 @@ export async function callGeminiAPI(history: any[], currentPersonaId: string = '
     let retries = 0;
     while (retries <= 5) {
         try {
-            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_TEXT_MODEL}:generateContent?key=${GEMINI_API_KEY}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
