@@ -46,6 +46,11 @@ export function initLegacyEngine() {
             let decayTimeout;
             let coreTypingTimeout;
             let tooltipTimeout; // Tracks the hover delay
+            const WEB_SNAPSHOT_TTL_MS = 12 * 60 * 60 * 1000;
+            const WEB_SNAPSHOT_MAX_CHARS = 900;
+            const WEB_SNAPSHOT_MAX_SOURCES = 3;
+            let webSnapshot = null;
+            let lastWebQuery = '';
 
             // --- Persistent Storage (Firebase Initialization) ---
             let user = null;
@@ -117,6 +122,116 @@ export function initLegacyEngine() {
                 terminal: { name: "TERMINAL", prompt: "You are the Terminal interface of the System. You communicate with machine-like precision, framing your responses somewhat like a system log or console output. However, you remain conversational, helpful, and easily understandable—do not use overly deep, dense, or broken technical jargon. Deliver information clearly and logically. NEVER use markdown formatting like asterisks or bold text." }
             };
             let currentPersonaId = 'system';
+
+            function getActiveWebSnapshot() {
+                if (!webSnapshot) return null;
+                if ((Date.now() - webSnapshot.capturedAt) > WEB_SNAPSHOT_TTL_MS) {
+                    webSnapshot = null;
+                    return null;
+                }
+                return webSnapshot;
+            }
+
+            function extractGroundedSources(groundingMetadata) {
+                const chunks = groundingMetadata?.groundingChunks || [];
+                const seen = new Set();
+                const sources = [];
+                for (const chunk of chunks) {
+                    const uri = chunk?.web?.uri;
+                    if (!uri || seen.has(uri)) continue;
+                    seen.add(uri);
+                    sources.push({
+                        title: chunk?.web?.title || uri,
+                        uri
+                    });
+                    if (sources.length >= WEB_SNAPSHOT_MAX_SOURCES) break;
+                }
+                return sources;
+            }
+
+            function updateWebSnapshot(query, responseText, groundingMetadata) {
+                const cleanSummary = (responseText || '').replace(/\s+/g, ' ').trim();
+                const summary = cleanSummary.length > WEB_SNAPSHOT_MAX_CHARS
+                    ? `${cleanSummary.substring(0, WEB_SNAPSHOT_MAX_CHARS)}...`
+                    : cleanSummary;
+                webSnapshot = {
+                    query,
+                    summary,
+                    sources: extractGroundedSources(groundingMetadata),
+                    capturedAt: Date.now()
+                };
+                lastWebQuery = query;
+            }
+
+            function buildWebSnapshotInstruction() {
+                const activeSnapshot = getActiveWebSnapshot();
+                if (!activeSnapshot) return '';
+                const capturedAt = new Date(activeSnapshot.capturedAt).toLocaleString('en-US', {
+                    weekday: 'long',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                    hour: 'numeric',
+                    minute: 'numeric'
+                });
+                const sourcesText = activeSnapshot.sources.length
+                    ? activeSnapshot.sources.map((source, index) => `${index + 1}. ${source.title} (${source.uri})`).join('\n')
+                    : 'No source links captured in the previous grounding run.';
+                return [
+                    'You have a recent grounded web snapshot from this chat.',
+                    `Snapshot query: ${activeSnapshot.query}`,
+                    `Snapshot captured at: ${capturedAt}.`,
+                    `Snapshot summary: ${activeSnapshot.summary}`,
+                    `Snapshot sources:\n${sourcesText}`,
+                    'Use this snapshot as supporting context for follow-up answers unless the user asks for a fresher web run.'
+                ].join('\n');
+            }
+
+            function formatWebStatusText() {
+                const activeSnapshot = getActiveWebSnapshot();
+                if (!activeSnapshot) {
+                    return "No active web snapshot. Use /web <question> to fetch live data.";
+                }
+                const ageMinutes = Math.max(1, Math.round((Date.now() - activeSnapshot.capturedAt) / 60000));
+                const capturedAt = new Date(activeSnapshot.capturedAt).toLocaleString('en-US', {
+                    weekday: 'long',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                    hour: 'numeric',
+                    minute: 'numeric'
+                });
+                const sourcePreview = activeSnapshot.sources.length
+                    ? activeSnapshot.sources.map((source, index) => `${index + 1}. ${source.title}`).join('\n')
+                    : 'No source links captured.';
+                return `Web snapshot active (${ageMinutes} min old).\nQuery: ${activeSnapshot.query}\nCaptured: ${capturedAt}\nSources:\n${sourcePreview}`;
+            }
+
+            async function showCommandResponse(text) {
+                document.body.classList.add('state-reading');
+                inputField.blur();
+                await displayResponse(text, true);
+            }
+
+            function formatResponseForDisplay(rawText) {
+                let text = String(rawText || '')
+                    .replace(/\r\n/g, '\n')
+                    .replace(/[ \t]+\n/g, '\n')
+                    .replace(/\n{3,}/g, '\n\n')
+                    .trim();
+
+                // If the model returned a long block without line breaks, split by sentences.
+                if (!text.includes('\n') && text.length > 220) {
+                    text = text.replace(/([.!?])\s+(?=[A-Z0-9])/g, '$1\n');
+                }
+
+                // Improve readability for inline numbered lists.
+                text = text
+                    .replace(/\s+(\d+\.)\s+/g, '\n$1 ')
+                    .replace(/\s+([-*•])\s+/g, '\n$1 ');
+
+                return text;
+            }
 
             function buildToneMenu() {
                 toneList.innerHTML = '';
@@ -362,6 +477,8 @@ export function initLegacyEngine() {
 
                 currentChatId = id;
                 conversationHistory = chat.history;
+                webSnapshot = null;
+                lastWebQuery = '';
 
                 // Fast clear
                 outputField.innerHTML = '';
@@ -393,7 +510,8 @@ export function initLegacyEngine() {
             }
 
             async function submitQuery(text) {
-                const queryText = text.trim().toLowerCase();
+                const rawText = text.trim();
+                const queryText = rawText.toLowerCase();
                 if (queryText === '/help') { inputField.innerText = ''; toggleOverlay(helpOverlay, helpIndicator); return; }
                 if (queryText === '/tone') { inputField.innerText = ''; toggleOverlay(toneOverlay); return; }
                 if (queryText === '/chats') { inputField.innerText = ''; toggleOverlay(chatsOverlay, chatsIndicator); return; }
@@ -402,6 +520,54 @@ export function initLegacyEngine() {
                     if (currentChatId && window.deleteFromArchive) window.deleteFromArchive(currentChatId);
                     executeDeleteReset(); 
                     return; 
+                }
+                if (queryText === '/webstatus') {
+                    inputField.innerText = '';
+                    await showCommandResponse(formatWebStatusText());
+                    return;
+                }
+                if (queryText === '/webclear') {
+                    inputField.innerText = '';
+                    webSnapshot = null;
+                    lastWebQuery = '';
+                    await showCommandResponse("Cached web snapshot cleared. Use /web <question> to fetch fresh live data.");
+                    return;
+                }
+
+                let promptText = rawText;
+                let useWebGrounding = false;
+                let shouldUpdateWebSnapshot = false;
+
+                if (queryText === '/web') {
+                    inputField.innerText = '';
+                    await showCommandResponse("Usage: /web <question>. Example: /web latest ai news today");
+                    return;
+                }
+
+                if (queryText.startsWith('/web ')) {
+                    promptText = rawText.substring(5).trim();
+                    if (!promptText) {
+                        inputField.innerText = '';
+                        await showCommandResponse("Usage: /web <question>. Example: /web latest ai news today");
+                        return;
+                    }
+                    useWebGrounding = true;
+                    shouldUpdateWebSnapshot = true;
+                    lastWebQuery = promptText;
+                }
+
+                if (queryText === '/refreshweb' || queryText.startsWith('/refreshweb ')) {
+                    const explicitRefreshPrompt = rawText.substring('/refreshweb'.length).trim();
+                    const cachedPrompt = getActiveWebSnapshot()?.query || lastWebQuery;
+                    promptText = explicitRefreshPrompt || cachedPrompt || '';
+                    if (!promptText) {
+                        inputField.innerText = '';
+                        await showCommandResponse("No previous web query found. Use /web <question> first, or /refreshweb <question>.");
+                        return;
+                    }
+                    useWebGrounding = true;
+                    shouldUpdateWebSnapshot = true;
+                    lastWebQuery = promptText;
                 }
 
                 // Initialize a new chat session if none exists
@@ -412,14 +578,14 @@ export function initLegacyEngine() {
 
                 currentState = 'PROCESSING';
                 ambientCore.className = 'state-processing';
-                statusText.textContent = "Synthesizing";
+                statusText.textContent = useWebGrounding ? "Grounding Search" : "Synthesizing";
                 statusText.classList.add('pulse-text');
                 
                 const placeholder = document.createElement('div');
                 placeholder.className = 'history-item placeholder';
                 placeholder.style.opacity = '0';
-                placeholder.textContent = text;
-                placeholder.dataset.fullText = text;
+                placeholder.textContent = promptText;
+                placeholder.dataset.fullText = promptText;
                 stack.appendChild(placeholder);
                 
                 // THE FIX: The "Pre-Calculation" Trick
@@ -433,7 +599,7 @@ export function initLegacyEngine() {
 
                 const rect = inputField.getBoundingClientRect();
                 const clone = document.createElement('div');
-                clone.innerText = inputField.innerText; 
+                clone.innerText = promptText; 
                 clone.style.position = 'absolute';
                 clone.style.left = rect.left + 'px';
                 clone.style.top = rect.top + 'px';
@@ -480,7 +646,10 @@ export function initLegacyEngine() {
                     }
                 }, 1000);
 
-                const response = await callGeminiAPI(text);
+                const response = await callGeminiAPI(promptText, {
+                    useWebGrounding,
+                    shouldUpdateWebSnapshot
+                });
                 placeholder.dataset.response = response;
                 displayResponse(response, false);
             }
@@ -534,6 +703,8 @@ export function initLegacyEngine() {
                 setTimeout(() => {
                     conversationHistory = []; 
                     currentChatId = null;
+                    webSnapshot = null;
+                    lastWebQuery = '';
                     
                     stack.innerHTML = '';
                     memoryCanvas.innerHTML = '';
@@ -612,6 +783,8 @@ export function initLegacyEngine() {
                 setTimeout(() => {
                     conversationHistory = []; 
                     currentChatId = null;
+                    webSnapshot = null;
+                    lastWebQuery = '';
                     
                     stack.innerHTML = '';
                     memoryCanvas.innerHTML = '';
@@ -641,7 +814,9 @@ export function initLegacyEngine() {
                 }, totalResetDelay); 
             }
 
-            async function callGeminiAPI(query) {
+            async function callGeminiAPI(query, options = {}) {
+                const useWebGrounding = !!options.useWebGrounding;
+                const shouldUpdateWebSnapshot = !!options.shouldUpdateWebSnapshot;
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
                 
                 // CRITICAL FIX: Grab the live local date and time from the browser
@@ -652,12 +827,16 @@ export function initLegacyEngine() {
                 
                 // Inject it silently into the AI's brain
                 const baseInstruction = personas[currentPersonaId].prompt;
-                const aiInstruction = `${baseInstruction} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.`;
+                const webSnapshotInstruction = buildWebSnapshotInstruction();
+                const aiInstruction = `${baseInstruction} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.${webSnapshotInstruction ? `\n\n${webSnapshotInstruction}` : ''}`;
                 
                 const payload = {
                     contents: conversationHistory,
                     systemInstruction: { parts: [{ text: aiInstruction }] }
                 };
+                if (useWebGrounding) {
+                    payload.tools = [{ google_search: {} }];
+                }
                 
                 let retries = 0;
                 while (retries <= 5) {
@@ -669,8 +848,13 @@ export function initLegacyEngine() {
                         });
                         if (!res.ok) throw new Error();
                         const result = await res.json();
-                        const aiText = result.candidates?.[0]?.content?.parts?.[0]?.text || "The void remains.";
+                        const topCandidate = result.candidates?.[0] || {};
+                        const textParts = topCandidate?.content?.parts?.map(part => part?.text || '').filter(Boolean) || [];
+                        const aiText = (textParts.join('') || "The void remains.").trim();
                         conversationHistory.push({ role: "model", parts: [{ text: aiText }] });
+                        if (useWebGrounding && shouldUpdateWebSnapshot) {
+                            updateWebSnapshot(query, aiText, topCandidate?.groundingMetadata);
+                        }
                         
                         // Fire off the background save to Archives
                         if (window.saveToArchive) {
@@ -682,6 +866,7 @@ export function initLegacyEngine() {
                         await new Promise(r => setTimeout(r, [1000, 2000, 4000, 8000, 16000][retries++])); 
                     }
                 }
+                return "The void remains.";
             }
 
             async function displayResponse(text, isFastRecall = false) {

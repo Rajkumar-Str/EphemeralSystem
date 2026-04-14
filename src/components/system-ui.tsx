@@ -32,6 +32,22 @@ export default function SystemUI() {
                         <div className="overlay-desc">Reveal this index of directives.</div>
                     </div>
                     <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/web</div>
+                        <div className="overlay-desc">Fetch live web-grounded data for one query.</div>
+                    </div>
+                    <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/refreshweb</div>
+                        <div className="overlay-desc">Refresh the most recent grounded web query.</div>
+                    </div>
+                    <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/webstatus</div>
+                        <div className="overlay-desc">Inspect the current cached web snapshot.</div>
+                    </div>
+                    <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/webclear</div>
+                        <div className="overlay-desc">Erase cached web snapshot memory.</div>
+                    </div>
+                    <div className="overlay-item">
                         <div className="overlay-cmd" style={{textAlign: 'right'}}>/void</div>
                         <div className="overlay-desc">Shatter reality and start a new session.</div>
                     </div>
