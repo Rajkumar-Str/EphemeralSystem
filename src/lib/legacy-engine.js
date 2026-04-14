@@ -40,19 +40,20 @@ export function initLegacyEngine() {
             const ambientCore = document.getElementById('ambient-core');
             const cinematicTooltip = document.getElementById('cinematic-tooltip');
             
-            const apiKey = "API_KEY_PLACEHOLDER"; 
+            const env = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env : {};
+            const apiKey = env.VITE_GEMINI_API_KEY || "API_KEY_PLACEHOLDER";
             const NORMAL_CHAT_MODEL = "gemini-3.1-flash-lite-preview";
             const WEB_GROUNDED_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
             const ENABLE_MAP_GROUNDING = false;
             const fallbackFirebaseConfig = {
-                apiKey: "API_KEY_PLACEHOLDER",
-                authDomain: "FIREBASE_AUTH_DOMAIN_PLACEHOLDER",
-                databaseURL: "FIREBASE_DATABASE_URL_PLACEHOLDER",
-                projectId: "FIREBASE_PROJECT_ID_PLACEHOLDER",
-                storageBucket: "FIREBASE_STORAGE_BUCKET_PLACEHOLDER",
-                messagingSenderId: "FIREBASE_MESSAGING_SENDER_ID_PLACEHOLDER",
-                appId: "FIREBASE_APP_ID_PLACEHOLDER",
-                measurementId: "FIREBASE_MEASUREMENT_ID_PLACEHOLDER"
+                apiKey: env.VITE_FIREBASE_API_KEY || "API_KEY_PLACEHOLDER",
+                authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || "FIREBASE_AUTH_DOMAIN_PLACEHOLDER",
+                databaseURL: env.VITE_FIREBASE_DATABASE_URL || "FIREBASE_DATABASE_URL_PLACEHOLDER",
+                projectId: env.VITE_FIREBASE_PROJECT_ID || "FIREBASE_PROJECT_ID_PLACEHOLDER",
+                storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || "FIREBASE_STORAGE_BUCKET_PLACEHOLDER",
+                messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || "FIREBASE_MESSAGING_SENDER_ID_PLACEHOLDER",
+                appId: env.VITE_FIREBASE_APP_ID || "FIREBASE_APP_ID_PLACEHOLDER",
+                measurementId: env.VITE_FIREBASE_MEASUREMENT_ID || "FIREBASE_MEASUREMENT_ID_PLACEHOLDER"
             };
             
             // --- State Variables ---
@@ -392,7 +393,10 @@ export function initLegacyEngine() {
             }
 
             function mapAuthError(error) {
-                const code = error && error.code ? String(error.code) : '';
+                const code = error && error.code ? String(error.code).toLowerCase() : '';
+                const message = error && error.message ? String(error.message).toLowerCase() : '';
+                if (code.includes('api-key-not-valid') || code.includes('invalid-api-key') || message.includes('api-key-not-valid') || message.includes('invalid-api-key')) return 'Firebase API key is invalid or missing in this deployed build.';
+                if (code.includes('configuration-not-found') || message.includes('configuration-not-found')) return 'Firebase Auth config not found. Check projectId/authDomain and deploy again.';
                 if (code.includes('invalid-email')) return 'Invalid email format.';
                 if (code.includes('missing-password')) return 'Password is required.';
                 if (code.includes('invalid-credential') || code.includes('wrong-password')) return 'Wrong email or password.';
