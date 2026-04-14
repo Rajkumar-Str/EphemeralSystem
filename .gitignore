@@ -25,3 +25,9 @@ dist-ssr
 
 # extract script 
 extract.cjs
+
+# Firebase local logs/cache
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
