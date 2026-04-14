@@ -878,46 +878,77 @@ export function initLegacyEngine() {
                 statusText.textContent = "Press any key to continue";
                 statusText.classList.remove('pulse-text');
                 outputField.innerHTML = '';
-                responseContainer.scrollTop = 0; 
-                const words = text.split(' ');
+                responseContainer.scrollTop = 0;
+                const formattedText = formatResponseForDisplay(text);
+                const tokens = formattedText.split(/(\n|[ \t]+)/).filter(token => token.length > 0);
+                const usesStructuredLayout = formattedText.includes('\n') || formattedText.length > 260;
+                outputField.classList.toggle('formatted-output', usesStructuredLayout);
                 
                 if (isFastRecall) {
                     let d = 0;
-                    words.forEach(w => {
+                    tokens.forEach(token => {
+                        if (token === '\n') {
+                            outputField.appendChild(document.createElement('br'));
+                            d += 2;
+                            return;
+                        }
+                        if (/^[ \t]+$/.test(token)) {
+                            outputField.appendChild(document.createTextNode(' '));
+                            d += 1;
+                            return;
+                        }
                         const s = document.createElement('span');
                         s.style.whiteSpace = 'nowrap';
-                        w.split('').forEach(c => {
+                        token.split('').forEach(c => {
                             const l = document.createElement('span');
                             l.className = 'letter';
                             l.textContent = c; 
                             l.style.animationDelay = `${d * 0.005}s`;
                             l.style.animationDuration = '0.4s'; 
-                            s.appendChild(l); d++;
+                            s.appendChild(l);
+                            d++;
                         });
                         outputField.appendChild(s);
-                        outputField.appendChild(document.createTextNode(' ')); d++;
+                        d++;
                     });
                     setTimeout(() => { checkScroll(); if (currentRenderToken === myToken) { isTyping = false; resetDecayTimer(); } }, 50);
                     return;
                 }
-                const delayMs = 25; 
-                for (let i = 0; i < words.length; i++) {
+
+                const delayMs = 25;
+                for (let i = 0; i < tokens.length; i++) {
                     if (currentRenderToken !== myToken || currentState !== 'READING') return;
-                    const word = words[i];
+                    const token = tokens[i];
+
+                    if (token === '\n') {
+                        outputField.appendChild(document.createElement('br'));
+                        checkScroll();
+                        await new Promise(r => setTimeout(r, delayMs * 2));
+                        continue;
+                    }
+
+                    if (/^[ \t]+$/.test(token)) {
+                        outputField.appendChild(document.createTextNode(' '));
+                        continue;
+                    }
+
                     const s = document.createElement('span');
-                    s.style.whiteSpace = 'nowrap'; outputField.appendChild(s);
-                    const chars = word.split('');
+                    s.style.whiteSpace = 'nowrap';
+                    outputField.appendChild(s);
+                    const chars = token.split('');
                     for (let j = 0; j < chars.length; j++) {
                         if (currentRenderToken !== myToken || currentState !== 'READING') return;
                         const l = document.createElement('span');
-                        l.className = 'letter'; l.textContent = chars[j]; 
-                        l.style.animationDelay = '0s'; l.style.animationDuration = '0.8s'; 
+                        l.className = 'letter';
+                        l.textContent = chars[j];
+                        l.style.animationDelay = '0s';
+                        l.style.animationDuration = '0.8s';
                         s.appendChild(l);
-                        if (responseContainer.scrollHeight - responseContainer.scrollTop <= responseContainer.clientHeight + 120) { responseContainer.scrollTop = responseContainer.scrollHeight; }
+                        if (responseContainer.scrollHeight - responseContainer.scrollTop <= responseContainer.clientHeight + 120) {
+                            responseContainer.scrollTop = responseContainer.scrollHeight;
+                        }
                         await new Promise(r => setTimeout(r, delayMs));
                     }
-                    outputField.appendChild(document.createTextNode(' '));
-                    await new Promise(r => setTimeout(r, delayMs));
                     checkScroll();
                 }
                 if (currentRenderToken === myToken) { isTyping = false; resetDecayTimer(); }
@@ -934,6 +965,7 @@ export function initLegacyEngine() {
                 outputField.style.transform = '';
                 outputField.style.color = '';
                 outputField.style.textShadow = '';
+                outputField.classList.remove('formatted-output');
                 if(outputField.innerText.trim() !== '') commitToMemory(outputField.innerText, false);
                 currentState = 'INPUT';
                 document.body.classList.remove('state-reading');
