@@ -1,4 +1,4 @@
-# Logs
+﻿# Logs
 logs
 *.log
 npm-debug.log*
@@ -34,3 +34,9 @@ ui-debug.log*
 
 # Local planning docs
 IMPLEMENTATION_CHECKLIST.md
+
+# Env files
+.env
+.env.*
+!.env.example
+

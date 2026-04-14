@@ -1,4 +1,4 @@
-export const GEMINI_API_KEY = "API_KEY_PLACEHOLDER";
+﻿export const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "API_KEY_PLACEHOLDER";
 export const DEFAULT_TEXT_MODEL = "gemini-3.1-flash-lite-preview";
 
 export const personas = {
@@ -44,3 +44,5 @@ export async function callGeminiAPI(history: any[], currentPersonaId: string = '
     }
     return "The void remains.";
 }
+
+
