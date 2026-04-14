@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 export function initLegacyEngine() {
@@ -20,9 +20,23 @@ export function initLegacyEngine() {
             const helpOverlay = document.getElementById('help-overlay');
             const toneOverlay = document.getElementById('tone-overlay');
             const chatsOverlay = document.getElementById('chats-overlay');
+            const authOverlay = document.getElementById('auth-overlay');
+            const authCard = authOverlay ? authOverlay.querySelector('.auth-card') : null;
             
             const toneList = document.getElementById('tone-list');
             const chatsList = document.getElementById('chats-list');
+            const authSignInBtn = document.getElementById('auth-signin-btn');
+            const authSignUpBtn = document.getElementById('auth-signup-btn');
+            const authSubmitBtn = document.getElementById('auth-submit-btn');
+            const authSignOutBtn = document.getElementById('auth-signout-btn');
+            const authOpenProfileBtn = document.getElementById('auth-open-profile-btn');
+            const authContinueChatBtn = document.getElementById('auth-continue-chat-btn');
+            const authLoggedOutView = document.getElementById('auth-loggedout-view');
+            const authLoggedInView = document.getElementById('auth-loggedin-view');
+            const authEmailInput = document.getElementById('auth-email-input');
+            const authPasswordInput = document.getElementById('auth-password-input');
+            const authStatusText = document.getElementById('auth-status-text');
+            const authUserText = document.getElementById('auth-user-text');
             const ambientCore = document.getElementById('ambient-core');
             const cinematicTooltip = document.getElementById('cinematic-tooltip');
             
@@ -61,6 +75,11 @@ export function initLegacyEngine() {
                 snapshotAgeMinutes: 0,
                 groundedSources: []
             };
+            let pendingAuthIntent = null;
+            let auth = null;
+            let db = null;
+            let appId = 'default-app-id';
+            let chatsUnsubscribe = null;
 
             // --- Persistent Storage (Firebase Initialization) ---
             let user = null;
@@ -70,34 +89,62 @@ export function initLegacyEngine() {
                 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : fallbackFirebaseConfig;
                 if (firebaseConfig) {
                     const app = initializeApp(firebaseConfig);
-                    const auth = getAuth(app);
-                    const db = getFirestore(app);
-                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                    auth = getAuth(app);
+                    db = getFirestore(app);
+                    appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+                    const readInitialAuthState = () => new Promise((resolve) => {
+                        const stop = onAuthStateChanged(auth, (initialUser) => {
+                            stop();
+                            resolve(initialUser);
+                        }, () => {
+                            resolve(null);
+                        });
+                    });
 
                     const initAuth = async () => {
                         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                             await signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
+                            return;
+                        }
+
+                        const restoredUser = await readInitialAuthState();
+                        if (restoredUser) return;
+
+                        try {
                             await signInAnonymously(auth);
+                        } catch (anonymousAuthError) {
+                            console.warn("Anonymous auth unavailable. Use /auth to continue.", anonymousAuthError);
                         }
                     };
-                    initAuth();
+                    initAuth().catch((initialAuthError) => console.warn("Initial auth failed:", initialAuthError));
 
                     onAuthStateChanged(auth, (u) => {
                         user = u;
+
+                        if (chatsUnsubscribe) {
+                            chatsUnsubscribe();
+                            chatsUnsubscribe = null;
+                        }
+
                         if (user) {
                             const chatsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'chats');
-                            onSnapshot(chatsRef, (snapshot) => {
+                            chatsUnsubscribe = onSnapshot(chatsRef, (snapshot) => {
                                 archives = [];
                                 snapshot.forEach(d => archives.push({ id: d.id, ...d.data() }));
                                 archives.sort((a, b) => b.updatedAt - a.updatedAt);
                                 buildChatsMenu();
                             }, (error) => console.error("Archive sync error:", error));
+                        } else {
+                            archives = [];
+                            buildChatsMenu();
                         }
+
+                        updateAuthSessionUI();
                     });
                     
                     window.saveToArchive = async function() {
-                        if (!user || !currentChatId || conversationHistory.length === 0) return;
+                        if (!user || !db || !currentChatId || conversationHistory.length === 0) return;
                         let title = conversationHistory[0].parts[0].text.substring(0, 30);
                         if (conversationHistory[0].parts[0].text.length > 30) title += '...';
                         
@@ -108,14 +155,14 @@ export function initLegacyEngine() {
                         const cleanHistory = JSON.parse(JSON.stringify(conversationHistory));
 
                         await setDoc(chatRef, {
-                            title: title,
+                            title,
                             history: cleanHistory,
                             updatedAt: Date.now()
                         }, { merge: true });
                     };
 
                     window.deleteFromArchive = async function(id) {
-                        if (!user || !id) return;
+                        if (!user || !db || !id) return;
                         const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chats', id);
                         await deleteDoc(chatRef);
                     };
@@ -278,12 +325,182 @@ export function initLegacyEngine() {
                 }
             }
 
+            
             async function showCommandResponse(text) {
                 resetResponseMeta();
                 clearResponseMetaUI();
                 document.body.classList.add('state-reading');
                 inputField.blur();
                 await displayResponse(text, true);
+            }
+
+            function setAuthStatus(text = '', variant = '') {
+                if (!authStatusText) return;
+                authStatusText.textContent = text;
+                authStatusText.classList.remove('success', 'error');
+                if (variant) authStatusText.classList.add(variant);
+            }
+
+            function updateAuthSessionUI() {
+                const isSignedIn = !!(user && !user.isAnonymous);
+
+                if (authLoggedOutView) {
+                    authLoggedOutView.classList.toggle('auth-view-hidden', isSignedIn);
+                }
+                if (authLoggedInView) {
+                    authLoggedInView.classList.toggle('auth-view-hidden', !isSignedIn);
+                }
+
+                if (authUserText) {
+                    authUserText.textContent = isSignedIn
+                        ? `Signed in as ${user.email || user.uid}`
+                        : 'Not signed in';
+                }
+
+                if (authSignOutBtn) {
+                    authSignOutBtn.disabled = !isSignedIn;
+                }
+                if (authOpenProfileBtn) {
+                    authOpenProfileBtn.disabled = !isSignedIn;
+                }
+            }
+
+            function updateAuthCardSelection(intent = 'signin') {
+                pendingAuthIntent = intent === 'signup' ? 'signup' : 'signin';
+                const isSignUp = pendingAuthIntent === 'signup';
+                if (authSignInBtn) authSignInBtn.classList.toggle('selected', !isSignUp);
+                if (authSignUpBtn) authSignUpBtn.classList.toggle('selected', isSignUp);
+                if (authSubmitBtn) authSubmitBtn.textContent = isSignUp ? 'Create account' : 'Sign in';
+            }
+
+            function setAuthBusy(isBusy) {
+                const isSignedIn = !!(user && !user.isAnonymous);
+                if (authEmailInput) authEmailInput.disabled = isBusy;
+                if (authPasswordInput) authPasswordInput.disabled = isBusy;
+                if (authSubmitBtn) authSubmitBtn.disabled = isBusy;
+                if (authSignInBtn) authSignInBtn.disabled = isBusy;
+                if (authSignUpBtn) authSignUpBtn.disabled = isBusy;
+                if (authSignOutBtn) authSignOutBtn.disabled = isBusy || !isSignedIn;
+                if (authOpenProfileBtn) authOpenProfileBtn.disabled = isBusy || !isSignedIn;
+                if (authContinueChatBtn) authContinueChatBtn.disabled = isBusy;
+            }
+
+            function readAuthCredentials() {
+                const email = authEmailInput ? String(authEmailInput.value || '').trim() : '';
+                const password = authPasswordInput ? String(authPasswordInput.value || '').trim() : '';
+                return { email, password };
+            }
+
+            function mapAuthError(error) {
+                const code = error && error.code ? String(error.code) : '';
+                if (code.includes('invalid-email')) return 'Invalid email format.';
+                if (code.includes('missing-password')) return 'Password is required.';
+                if (code.includes('invalid-credential') || code.includes('wrong-password')) return 'Wrong email or password.';
+                if (code.includes('user-not-found')) return 'No account found for this email.';
+                if (code.includes('email-already-in-use')) return 'This email is already registered. Use Sign in.';
+                if (code.includes('weak-password')) return 'Password is too weak (use at least 6 characters).';
+                if (code.includes('too-many-requests')) return 'Too many attempts. Try again shortly.';
+                if (code.includes('operation-not-allowed')) return 'Enable Email/Password in Firebase Auth settings.';
+                return 'Authentication failed. Check credentials and try again.';
+            }
+            function redirectToProfile(signedInUser) {
+                if (!signedInUser) return;
+                try {
+                    localStorage.setItem('ephemeral_profile_user', JSON.stringify({
+                        email: signedInUser.email || '',
+                        uid: signedInUser.uid || ''
+                    }));
+                } catch (_) {
+                    // Ignore storage write failures.
+                }
+                window.location.assign('/profile');
+            }
+
+            async function openAuthCard() {
+                if (!authOverlay || !authSignInBtn || !authSignUpBtn || !authSubmitBtn || !authEmailInput || !authPasswordInput) {
+                    await showCommandResponse("Auth card UI is not loaded. Hard refresh once and try /auth again.");
+                    return;
+                }
+                updateAuthCardSelection('signin');
+                const isSignedIn = !!(user && !user.isAnonymous);
+                if (isSignedIn) {
+                    setAuthStatus(`Signed in as ${user.email || 'account'}.`, 'success');
+                } else {
+                    setAuthStatus('');
+                }
+                toggleOverlay(authOverlay);
+                updateAuthSessionUI();
+                setTimeout(() => {
+                    if (!isSignedIn && authEmailInput) authEmailInput.focus();
+                }, 20);
+            }
+
+            function handleAuthChoice(intent) {
+                updateAuthCardSelection(intent);
+                setAuthStatus('');
+            }
+
+            async function submitAuthForm() {
+                if (!auth) {
+                    setAuthStatus('Firebase auth is not initialized.', 'error');
+                    return;
+                }
+
+                const { email, password } = readAuthCredentials();
+                if (!email) {
+                    setAuthStatus('Email is required.', 'error');
+                    return;
+                }
+                if (!password) {
+                    setAuthStatus('Password is required.', 'error');
+                    return;
+                }
+                if (password.length < 6) {
+                    setAuthStatus('Password must be at least 6 characters.', 'error');
+                    return;
+                }
+
+                try {
+                    setAuthBusy(true);
+                    setAuthStatus(pendingAuthIntent === 'signup' ? 'Creating account...' : 'Signing in...');
+                    let credential = null;
+                    if (pendingAuthIntent === 'signup') {
+                        credential = await createUserWithEmailAndPassword(auth, email, password);
+                        setAuthStatus('Account created and signed in.', 'success');
+                    } else {
+                        credential = await signInWithEmailAndPassword(auth, email, password);
+                        setAuthStatus('Signed in successfully.', 'success');
+                    }
+
+                    if (authPasswordInput) authPasswordInput.value = '';
+                    updateAuthSessionUI();
+
+                    const signedInUser = credential?.user;
+                    if (signedInUser && !signedInUser.isAnonymous) {
+                        redirectToProfile(signedInUser);
+                        return;
+                    }
+                } catch (authError) {
+                    setAuthStatus(mapAuthError(authError), 'error');
+                } finally {
+                    setAuthBusy(false);
+                }
+            }
+
+            async function signOutAuthUser() {
+                if (!auth || !user || user.isAnonymous) return;
+                try {
+                    setAuthBusy(true);
+                    await signOut(auth);
+                    if (authEmailInput) authEmailInput.value = '';
+                    if (authPasswordInput) authPasswordInput.value = '';
+                    setAuthStatus('Signed out.', 'success');
+                    updateAuthSessionUI();
+                } catch (authError) {
+                    setAuthStatus(mapAuthError(authError), 'error');
+                } finally {
+                    setAuthBusy(false);
+                }
             }
 
             function formatResponseForDisplay(rawText) {
@@ -352,6 +569,9 @@ export function initLegacyEngine() {
 
             buildToneMenu();
             buildChatsMenu();
+            updateAuthCardSelection('signin');
+            updateAuthSessionUI();
+            setAuthBusy(false);
             inputField.focus();
 
             // --- Core Listeners ---
@@ -404,6 +624,7 @@ export function initLegacyEngine() {
 
             // --- Overlay Management ---
             function toggleOverlay(overlayElement, indicatorElement) {
+                if (!overlayElement) return;
                 const isActive = overlayElement.classList.contains('active');
                 if (!isActive) {
                     closeOverlays();
@@ -424,6 +645,7 @@ export function initLegacyEngine() {
                 helpOverlay.classList.remove('active');
                 toneOverlay.classList.remove('active');
                 chatsOverlay.classList.remove('active');
+                if (authOverlay) authOverlay.classList.remove('active');
 
                 helpIndicator.innerText = '/help';
                 helpIndicator.style.opacity = '0.5';
@@ -446,12 +668,67 @@ export function initLegacyEngine() {
                 else toggleOverlay(chatsOverlay, chatsIndicator);
             });
 
+            if (authSignInBtn) {
+                authSignInBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    handleAuthChoice('signin');
+                });
+            }
+
+            if (authSignUpBtn) {
+                authSignUpBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    handleAuthChoice('signup');
+                });
+            }
+
+            if (authSubmitBtn) {
+                authSubmitBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await submitAuthForm();
+                });
+            }
+
+            if (authSignOutBtn) {
+                authSignOutBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await signOutAuthUser();
+                });
+            }
+
+            if (authOpenProfileBtn) {
+                authOpenProfileBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    window.location.assign('/profile');
+                });
+            }
+
+            if (authContinueChatBtn) {
+                authContinueChatBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    closeOverlays();
+                    if (currentState === 'INPUT') inputField.focus();
+                });
+            }
+
+            const authEnterHandler = async (e) => {
+                if (e.key !== 'Enter') return;
+                if (authLoggedOutView && authLoggedOutView.classList.contains('auth-view-hidden')) return;
+                e.preventDefault();
+                e.stopPropagation();
+                await submitAuthForm();
+            };
+
+            if (authEmailInput) authEmailInput.addEventListener('keydown', authEnterHandler);
+            if (authPasswordInput) authPasswordInput.addEventListener('keydown', authEnterHandler);
             helpOverlay.addEventListener('click', closeOverlays);
             toneOverlay.addEventListener('click', closeOverlays);
             chatsOverlay.addEventListener('click', closeOverlays);
+            if (authOverlay) authOverlay.addEventListener('click', closeOverlays);
+            if (authCard) authCard.addEventListener('click', (e) => e.stopPropagation());
 
             document.body.addEventListener('click', (e) => {
-                if (helpOverlay.classList.contains('active') || toneOverlay.classList.contains('active') || chatsOverlay.classList.contains('active')) return;
+                if (helpOverlay.classList.contains('active') || toneOverlay.classList.contains('active') || chatsOverlay.classList.contains('active') || (authOverlay && authOverlay.classList.contains('active'))) return;
                 if(currentState === 'INPUT') inputField.focus();
                 if(currentState === 'READING') {
                     if (e.target.closest('#response-container') || e.target.closest('#history-stack')) return;
@@ -471,8 +748,18 @@ export function initLegacyEngine() {
             });
 
             document.addEventListener('keydown', (e) => {
-                const overlaysActive = helpOverlay.classList.contains('active') || toneOverlay.classList.contains('active') || chatsOverlay.classList.contains('active');
+                const overlaysActive = helpOverlay.classList.contains('active') || toneOverlay.classList.contains('active') || chatsOverlay.classList.contains('active') || (authOverlay && authOverlay.classList.contains('active'));
                 if (overlaysActive) {
+                    const authOverlayActive = authOverlay && authOverlay.classList.contains('active');
+                    const targetInsideAuthCard = authCard && authCard.contains(e.target);
+                    if (authOverlayActive && targetInsideAuthCard) {
+                        if (e.key === 'Escape') {
+                            closeOverlays();
+                            if (currentState === 'INPUT') inputField.focus();
+                        }
+                        return;
+                    }
+
                     if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
                     closeOverlays();
                     if (!['Escape', 'Enter'].includes(e.key)) inputField.focus();
@@ -583,7 +870,7 @@ export function initLegacyEngine() {
             }
 
             async function submitQuery(text) {
-                const rawText = text.trim();
+                const rawText = String(text || '').replace(/\u200B/g, '').trim();
                 const queryText = rawText.toLowerCase();
                 if (queryText === '/help') { inputField.innerText = ''; toggleOverlay(helpOverlay, helpIndicator); return; }
                 if (queryText === '/tone') { inputField.innerText = ''; toggleOverlay(toneOverlay); return; }
@@ -593,6 +880,21 @@ export function initLegacyEngine() {
                     if (currentChatId && window.deleteFromArchive) window.deleteFromArchive(currentChatId);
                     executeDeleteReset(); 
                     return; 
+                }
+                if (queryText === '/auth') {
+                    inputField.innerText = '';
+                    await openAuthCard();
+                    return;
+                }
+                if (queryText === '/profile') {
+                    inputField.innerText = '';
+                    window.location.assign('/profile');
+                    return;
+                }
+                if (/^\/auth\s+/.test(queryText)) {
+                    inputField.innerText = '';
+                    await showCommandResponse("Usage: /auth");
+                    return;
                 }
                 if (queryText === '/webstatus') {
                     inputField.innerText = '';
