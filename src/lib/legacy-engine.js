@@ -6,6 +6,8 @@ export function initLegacyEngine() {
         
             const inputField = document.getElementById('user-input');
             const outputField = document.getElementById('ai-output');
+            const webSnapshotBanner = document.getElementById('web-snapshot-banner');
+            const groundingSourcesContainer = document.getElementById('grounding-sources');
             const statusText = document.getElementById('status-text');
             const memoryCanvas = document.getElementById('memory-canvas');
             const responseContainer = document.getElementById('response-container');
@@ -54,6 +56,11 @@ export function initLegacyEngine() {
             const WEB_SNAPSHOT_MAX_SOURCES = 3;
             let webSnapshot = null;
             let lastWebQuery = '';
+            let latestResponseMeta = {
+                usedCachedSnapshot: false,
+                snapshotAgeMinutes: 0,
+                groundedSources: []
+            };
 
             // --- Persistent Storage (Firebase Initialization) ---
             let user = null;
@@ -210,7 +217,70 @@ export function initLegacyEngine() {
                 return `Web snapshot active (${ageMinutes} min old).\nQuery: ${activeSnapshot.query}\nCaptured: ${capturedAt}\nSources:\n${sourcePreview}`;
             }
 
+            function resetResponseMeta() {
+                latestResponseMeta = {
+                    usedCachedSnapshot: false,
+                    snapshotAgeMinutes: 0,
+                    groundedSources: []
+                };
+            }
+
+            function clearResponseMetaUI() {
+                if (webSnapshotBanner) {
+                    webSnapshotBanner.textContent = '';
+                    webSnapshotBanner.classList.remove('visible');
+                }
+                if (groundingSourcesContainer) {
+                    groundingSourcesContainer.innerHTML = '';
+                    groundingSourcesContainer.classList.remove('visible');
+                }
+            }
+
+            function renderResponseMeta() {
+                clearResponseMetaUI();
+
+                if (latestResponseMeta.usedCachedSnapshot && webSnapshotBanner) {
+                    webSnapshotBanner.textContent = `Using web snapshot (${latestResponseMeta.snapshotAgeMinutes} min old)`;
+                    webSnapshotBanner.classList.add('visible');
+                }
+
+                if (latestResponseMeta.groundedSources.length > 0 && groundingSourcesContainer) {
+                    latestResponseMeta.groundedSources.forEach((source, index) => {
+                        const card = document.createElement('a');
+                        card.className = 'grounding-source-card';
+                        card.href = source.uri;
+                        card.target = '_blank';
+                        card.rel = 'noopener noreferrer';
+
+                        const idx = document.createElement('span');
+                        idx.className = 'source-index';
+                        idx.textContent = String(index + 1);
+
+                        const title = document.createElement('span');
+                        title.className = 'source-title';
+                        title.textContent = source.title || source.uri;
+
+                        const host = document.createElement('span');
+                        host.className = 'source-host';
+                        try {
+                            host.textContent = new URL(source.uri).hostname;
+                        } catch (_) {
+                            host.textContent = source.uri;
+                        }
+
+                        card.appendChild(idx);
+                        card.appendChild(title);
+                        card.appendChild(host);
+                        groundingSourcesContainer.appendChild(card);
+                    });
+
+                    groundingSourcesContainer.classList.add('visible');
+                }
+            }
+
             async function showCommandResponse(text) {
+                resetResponseMeta();
+                clearResponseMetaUI();
                 document.body.classList.add('state-reading');
                 inputField.blur();
                 await displayResponse(text, true);
@@ -821,6 +891,12 @@ export function initLegacyEngine() {
                 const useWebGrounding = !!options.useWebGrounding;
                 const shouldUpdateWebSnapshot = !!options.shouldUpdateWebSnapshot;
                 const candidateModels = useWebGrounding ? WEB_GROUNDED_MODELS : [NORMAL_CHAT_MODEL];
+                const activeSnapshotForThisTurn = !useWebGrounding ? getActiveWebSnapshot() : null;
+                latestResponseMeta = {
+                    usedCachedSnapshot: !!activeSnapshotForThisTurn,
+                    snapshotAgeMinutes: activeSnapshotForThisTurn ? Math.max(1, Math.round((Date.now() - activeSnapshotForThisTurn.capturedAt) / 60000)) : 0,
+                    groundedSources: []
+                };
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
                 
                 // CRITICAL FIX: Grab the live local date and time from the browser
@@ -847,10 +923,12 @@ export function initLegacyEngine() {
                 }
 
                 let lastStatusCode = 0;
+                let lastFailureMessage = '';
+                const retryBackoffMs = [1000, 2000, 4000];
                 
                 for (const modelId of candidateModels) {
                     let retries = 0;
-                    while (retries <= 5) {
+                    while (retries <= retryBackoffMs.length) {
                         try {
                             const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
                                 method: 'POST',
@@ -859,18 +937,31 @@ export function initLegacyEngine() {
                             });
                             if (!res.ok) {
                                 lastStatusCode = res.status;
-                                if (res.status === 429) {
+                                lastFailureMessage = `${modelId} -> HTTP ${res.status}`;
+                                if (res.status === 429 || res.status === 404 || res.status === 400 || res.status === 401 || res.status === 403) {
                                     break;
                                 }
-                                throw new Error(`HTTP ${res.status}`);
+                                if ([408, 500, 502, 503, 504].includes(res.status) && retries < retryBackoffMs.length) {
+                                    await new Promise(r => setTimeout(r, retryBackoffMs[retries++]));
+                                    continue;
+                                }
+                                break;
                             }
                             const result = await res.json();
                             const topCandidate = result.candidates?.[0] || {};
                             const textParts = topCandidate?.content?.parts?.map(part => part?.text || '').filter(Boolean) || [];
-                            const aiText = (textParts.join('') || "The void remains.").trim();
+                            const aiText = (textParts.join('') || '').trim();
+                            if (!aiText) {
+                                const emptyText = useWebGrounding
+                                    ? "Grounded web request returned no readable text. Try /refreshweb or ask a narrower question."
+                                    : "The model returned an empty answer. Please try again.";
+                                conversationHistory.push({ role: "model", parts: [{ text: emptyText }] });
+                                return emptyText;
+                            }
                             conversationHistory.push({ role: "model", parts: [{ text: aiText }] });
                             if (useWebGrounding && shouldUpdateWebSnapshot) {
                                 updateWebSnapshot(query, aiText, topCandidate?.groundingMetadata);
+                                latestResponseMeta.groundedSources = extractGroundedSources(topCandidate?.groundingMetadata);
                             }
                             
                             // Fire off the background save to Archives
@@ -879,8 +970,15 @@ export function initLegacyEngine() {
                             }
                             
                             return aiText;
-                        } catch (e) { 
-                            await new Promise(r => setTimeout(r, [1000, 2000, 4000, 8000, 16000][retries++])); 
+                        } catch (e) {
+                            const message = e instanceof Error ? e.message : String(e);
+                            lastFailureMessage = `${modelId} -> ${message}`;
+                            const isNetworkError = /Failed to fetch|NetworkError|Load failed|fetch/i.test(message);
+                            if (isNetworkError && retries < retryBackoffMs.length) {
+                                await new Promise(r => setTimeout(r, retryBackoffMs[retries++]));
+                                continue;
+                            }
+                            break;
                         }
                     }
                 }
@@ -888,12 +986,26 @@ export function initLegacyEngine() {
                 if (useWebGrounding) {
                     const webFallbackText = lastStatusCode === 429
                         ? "Live web lookup hit Gemini 2.5 free-tier limits right now. Wait for quota reset, or continue with normal chat."
-                        : "Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.";
+                        : lastStatusCode === 503
+                            ? "Live web lookup is temporarily overloaded right now. Try /refreshweb again in a minute."
+                            : lastStatusCode === 404
+                                ? "Current grounded model is unavailable for this key/project. Switch to another supported grounded model."
+                                : "Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.";
                     conversationHistory.push({ role: "model", parts: [{ text: webFallbackText }] });
+                    if (lastFailureMessage) console.error("Grounded request failed:", lastFailureMessage);
                     return webFallbackText;
                 }
 
-                return "The void remains.";
+                const chatFallbackText = lastStatusCode === 429
+                    ? "Chat model quota is exhausted right now. Wait for reset, then try again."
+                    : lastStatusCode === 503
+                        ? "Chat model is temporarily overloaded. Please try again in a minute."
+                        : lastStatusCode === 404
+                            ? "Configured chat model is unavailable for this key/project."
+                            : "The AI model is temporarily unavailable right now. Please try again in a moment.";
+                conversationHistory.push({ role: "model", parts: [{ text: chatFallbackText }] });
+                if (lastFailureMessage) console.error("Chat request failed:", lastFailureMessage);
+                return chatFallbackText;
             }
 
             async function displayResponse(text, isFastRecall = false) {
@@ -906,6 +1018,8 @@ export function initLegacyEngine() {
                 statusText.classList.remove('pulse-text');
                 outputField.innerHTML = '';
                 responseContainer.scrollTop = 0;
+                if (isFastRecall) clearResponseMetaUI();
+                else renderResponseMeta();
                 const formattedText = formatResponseForDisplay(text);
                 const tokens = formattedText.split(/(\n|[ \t]+)/).filter(token => token.length > 0);
                 const usesStructuredLayout = formattedText.includes('\n') || formattedText.length > 260;
@@ -986,6 +1100,8 @@ export function initLegacyEngine() {
                 isTyping = false;
                 clearTimeout(decayTimeout); 
                 ambientCore.className = 'state-idle';
+                resetResponseMeta();
+                clearResponseMetaUI();
                 outputField.style.transition = '';
                 outputField.style.opacity = '';
                 outputField.style.filter = '';

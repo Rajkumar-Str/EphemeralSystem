@@ -8,6 +8,8 @@ export default function ChatStage() {
                 <div id="user-input" contentEditable="true" spellCheck="false"></div>
             </div>
             <div id="response-container">
+                <div id="web-snapshot-banner" className="response-meta-banner"></div>
+                <div id="grounding-sources" className="grounding-sources"></div>
                 <div id="ai-output" className="ai-text"></div>
             </div>
             <div id="scroll-indicator">
