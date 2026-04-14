@@ -31,3 +31,6 @@ extract.cjs
 firebase-debug.log*
 firestore-debug.log*
 ui-debug.log*
+
+# Local planning docs
+IMPLEMENTATION_CHECKLIST.md
