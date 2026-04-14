@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 
+// Client-side env typings for Vite-exposed variables.
+
 interface ImportMetaEnv {
   readonly VITE_GEMINI_API_KEY?: string;
   readonly VITE_FIREBASE_API_KEY?: string;
