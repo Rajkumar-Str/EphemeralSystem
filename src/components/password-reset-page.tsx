@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { confirmPasswordReset, verifyPasswordResetCode } from 'firebase/auth';
+import { applyActionCode, confirmPasswordReset, verifyPasswordResetCode } from 'firebase/auth';
 import { auth, trackAnalyticsEvent } from '../lib/firebase-config';
 
-type ResetState = 'checking' | 'ready' | 'invalid' | 'success';
+type AuthActionMode = '' | 'resetPassword' | 'verifyEmail';
+type ResetState = 'checking' | 'ready' | 'invalid' | 'success' | 'verified';
 
 function VisibilityToggleButton({
   shown,
@@ -60,6 +61,15 @@ function mapVerifyError(error: unknown): string {
   return 'Unable to verify reset link. Request a new one from Forgot password.';
 }
 
+function mapEmailVerificationActionError(error: unknown): string {
+  const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
+  if (code.includes('expired-action-code')) return 'This verification link has expired. Request a new verification email.';
+  if (code.includes('invalid-action-code')) return 'This verification link is invalid or already used.';
+  if (code.includes('user-disabled')) return 'This account is disabled. Contact support for help.';
+  if (code.includes('user-not-found')) return 'This account is no longer available.';
+  return 'Unable to verify email right now. Request a new verification email.';
+}
+
 function mapConfirmError(error: unknown): string {
   const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
   if (code.includes('weak-password')) return 'New password is too weak. Use at least 6 characters.';
@@ -69,23 +79,48 @@ function mapConfirmError(error: unknown): string {
   return 'Unable to update password right now. Please try again.';
 }
 
-function readResetCodeFromUrl(): { mode: string; oobCode: string } {
-  if (typeof window === 'undefined') return { mode: '', oobCode: '' };
+function readActionDataFromUrl(): { mode: AuthActionMode; oobCode: string; continueUrl: string } {
+  if (typeof window === 'undefined') return { mode: '', oobCode: '', continueUrl: '' };
   const params = new URLSearchParams(window.location.search);
   return {
-    mode: String(params.get('mode') || ''),
+    mode: String(params.get('mode') || '') as AuthActionMode,
     oobCode: String(params.get('oobCode') || ''),
+    continueUrl: String(params.get('continueUrl') || ''),
   };
 }
 
+function normalizeContinuePath(rawContinueUrl: string, mode: AuthActionMode): string {
+  const fallbackPath = mode === 'verifyEmail' ? '/profile' : '/';
+  const raw = String(rawContinueUrl || '').trim();
+  if (!raw || typeof window === 'undefined') return fallbackPath;
+
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    if (parsed.origin !== window.location.origin) return fallbackPath;
+    const normalizedPath = `${parsed.pathname}${parsed.search}${parsed.hash}` || fallbackPath;
+    const normalizedPathname = parsed.pathname.replace(/\/+$/, '') || '/';
+
+    // Prevent redirect loops to action pages after completion.
+    if (normalizedPathname === '/auth-action') {
+      return fallbackPath;
+    }
+
+    return normalizedPath;
+  } catch {
+    return fallbackPath;
+  }
+}
+
 export default function PasswordResetPage() {
+  const [actionMode, setActionMode] = useState<AuthActionMode>('');
   const [resetState, setResetState] = useState<ResetState>('checking');
   const [resetCode, setResetCode] = useState('');
+  const [continuePath, setContinuePath] = useState('/');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('Checking reset link...');
+  const [statusMessage, setStatusMessage] = useState('Checking action link...');
   const [busy, setBusy] = useState(false);
   const passwordsMatch = newPassword.length > 0 && confirmNewPassword.length > 0 && newPassword === confirmNewPassword;
   const passwordsMismatch = confirmNewPassword.length > 0 && newPassword !== confirmNewPassword;
@@ -96,19 +131,41 @@ export default function PasswordResetPage() {
     newPassword === confirmNewPassword;
 
   useEffect(() => {
-    const { mode, oobCode } = readResetCodeFromUrl();
+    const { mode, oobCode, continueUrl } = readActionDataFromUrl();
+    setActionMode(mode);
+    setContinuePath(normalizeContinuePath(continueUrl, mode));
 
-    if (mode !== 'resetPassword' || !oobCode) {
+    if ((mode !== 'resetPassword' && mode !== 'verifyEmail') || !oobCode) {
       setResetState('invalid');
-      setStatusMessage('Reset link is incomplete. Please use the Forgot password link from the app.');
-      void trackAnalyticsEvent('reset_link_invalid', { reason: 'missing_code_or_mode' });
+      setStatusMessage('Action link is incomplete or invalid. Request a fresh link from the app.');
+      void trackAnalyticsEvent('auth_action_link_invalid', { reason: 'missing_code_or_mode' });
       return;
     }
 
     setResetCode(oobCode);
-    void trackAnalyticsEvent('reset_link_received');
+    void trackAnalyticsEvent('auth_action_link_received', { action_mode: mode });
 
-    const verifyCode = async () => {
+    if (mode === 'verifyEmail') {
+      const verifyEmailAction = async () => {
+        try {
+          await applyActionCode(auth, oobCode);
+          setResetState('verified');
+          setStatusMessage('Email verified successfully. Continue to your profile.');
+          void trackAnalyticsEvent('auth_email_action_verified');
+        } catch (error) {
+          setResetState('invalid');
+          setStatusMessage(mapEmailVerificationActionError(error));
+          void trackAnalyticsEvent('auth_email_action_invalid', {
+            error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+          });
+        }
+      };
+
+      void verifyEmailAction();
+      return;
+    }
+
+    const verifyResetCode = async () => {
       try {
         await verifyPasswordResetCode(auth, oobCode);
         setResetState('ready');
@@ -123,7 +180,7 @@ export default function PasswordResetPage() {
       }
     };
 
-    void verifyCode();
+    void verifyResetCode();
   }, []);
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -165,19 +222,33 @@ export default function PasswordResetPage() {
     }
   };
 
-  const goToChat = () => {
+  const handlePrimaryNavigation = () => {
+    if (actionMode === 'verifyEmail' || resetState === 'success') {
+      void trackAnalyticsEvent('auth_action_continue', { action_mode: actionMode || 'unknown' });
+      window.location.assign(continuePath);
+      return;
+    }
+
     void trackAnalyticsEvent('reset_back_to_chat');
     window.location.assign('/');
   };
+
+  const pageTitle = actionMode === 'verifyEmail' ? 'Verify Email' : 'Reset Password';
+  const pageDescription = actionMode === 'verifyEmail'
+    ? 'Use the email verification link to confirm your account access.'
+    : 'Use the password reset link from your email to securely set a new password.';
+  const primaryButtonText = actionMode === 'verifyEmail'
+    ? 'Continue'
+    : resetState === 'success'
+      ? 'Continue'
+      : 'Back To Chat';
 
   return (
     <div className="min-h-screen bg-[#020101] text-[#EAEAEA] px-4 py-8">
       <div className="mx-auto w-full max-w-md rounded-2xl border border-[#4b3a18] bg-[#090703] p-6 shadow-[0_0_35px_rgba(184,134,11,0.14)]">
         <p className="text-xs uppercase tracking-[0.28em] text-[#9b8b67]">Ephemeral System</p>
-        <h1 className="mt-3 text-2xl font-semibold tracking-wide text-[#f2f2f2]">Reset Password</h1>
-        <p className="mt-2 text-sm text-[#b8b8b8]">
-          Use the password reset link from your email to securely set a new password.
-        </p>
+        <h1 className="mt-3 text-2xl font-semibold tracking-wide text-[#f2f2f2]">{pageTitle}</h1>
+        <p className="mt-2 text-sm text-[#b8b8b8]">{pageDescription}</p>
 
         <div
           className={`mt-4 rounded-lg border p-3 text-sm ${
@@ -259,10 +330,10 @@ export default function PasswordResetPage() {
 
         <button
           type="button"
-          onClick={goToChat}
+          onClick={handlePrimaryNavigation}
           className="mt-4 w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-4 py-2 text-sm text-[#d9d9d9] hover:border-[#7f5f24] hover:bg-[#1a1307]"
         >
-          Back To Chat
+          {primaryButtonText}
         </button>
       </div>
     </div>
