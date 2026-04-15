@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   EmailAuthProvider,
   onAuthStateChanged,
+  reload,
   reauthenticateWithCredential,
+  sendEmailVerification,
   signOut,
   updatePassword,
   type User,
@@ -185,22 +187,42 @@ function mapPasswordUpdateError(error: unknown): string {
   return 'Unable to update password right now. Please try again.';
 }
 
+function mapEmailVerificationError(error: unknown): string {
+  const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
+  if (code.includes('too-many-requests')) {
+    return 'Too many verification requests. Please wait and try again.';
+  }
+  if (code.includes('network-request-failed')) {
+    return 'Network error while sending verification email. Check connection and retry.';
+  }
+  if (code.includes('invalid-email')) {
+    return 'This account email is invalid for verification.';
+  }
+  if (code.includes('operation-not-allowed')) {
+    return 'Email verification is disabled in Firebase Auth settings.';
+  }
+  return 'Unable to send verification email right now. Please try again.';
+}
+
 function VisibilityToggleButton({
   shown,
   onToggle,
   label,
+  disabled = false,
 }: {
   shown: boolean;
   onToggle: () => void;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onToggle}
+      disabled={disabled}
       aria-label={label}
       title={label}
-      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-[#3f3320] bg-[#141008] p-1.5 text-[#cfb67b] hover:border-[#8d6a2d] hover:text-[#f0d79c]"
+      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-[#3f3320] bg-[#141008] p-1.5 text-[#cfb67b] hover:border-[#8d6a2d] hover:text-[#f0d79c] disabled:cursor-not-allowed disabled:opacity-60"
     >
       {shown ? (
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -257,6 +279,10 @@ export default function ProfilePage() {
   const [activeField, setActiveField] = useState<ProfileField | null>(null);
   const [busy, setBusy] = useState(false);
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [isEmailVerified, setIsEmailVerified] = useState(false);
+  const [verificationBusy, setVerificationBusy] = useState(false);
+  const [verificationStatusMessage, setVerificationStatusMessage] = useState('');
+  const [verificationStatusType, setVerificationStatusType] = useState<'success' | 'error' | ''>('');
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [currentPasswordInput, setCurrentPasswordInput] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
@@ -277,7 +303,9 @@ export default function ProfilePage() {
     newPasswordInput !== confirmPasswordInput;
   const canSubmitPasswordChange =
     !passwordBusy &&
+    !verificationBusy &&
     !busy &&
+    isEmailVerified &&
     currentPasswordInput.length > 0 &&
     newPasswordInput.length >= 6 &&
     confirmPasswordInput.length > 0 &&
@@ -288,6 +316,7 @@ export default function ProfilePage() {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user && !user.isAnonymous) {
         setAuthUser(user);
+        setIsEmailVerified(!!user.emailVerified);
         void trackAnalyticsEvent('profile_auth_state', { state: 'authenticated' });
         setStatus('loading');
         setEmail(user.email || 'No email available');
@@ -351,6 +380,7 @@ export default function ProfilePage() {
         void loadRemoteProfile();
       } else {
         setAuthUser(null);
+        setIsEmailVerified(false);
         setCurrentPasswordInput('');
         setNewPasswordInput('');
         setConfirmPasswordInput('');
@@ -359,6 +389,8 @@ export default function ProfilePage() {
         setShowConfirmPassword(false);
         setPasswordStatusMessage('');
         setPasswordStatusType('');
+        setVerificationStatusMessage('');
+        setVerificationStatusType('');
         void trackAnalyticsEvent('profile_auth_state', { state: 'guest' });
         setStatus('guest');
         setIsRemoteLoaded(false);
@@ -478,6 +510,80 @@ export default function ProfilePage() {
     }
   };
 
+  const buildVerificationActionSettings = () => {
+    const verificationUrl = typeof window !== 'undefined' ? `${window.location.origin}/profile` : null;
+    return verificationUrl ? { url: verificationUrl, handleCodeInApp: false } : undefined;
+  };
+
+  const handleResendVerificationEmail = async () => {
+    setVerificationStatusMessage('');
+    setVerificationStatusType('');
+
+    if (!authUser || authUser.isAnonymous || !authUser.email) {
+      setVerificationStatusMessage('No email account is available for verification.');
+      setVerificationStatusType('error');
+      return;
+    }
+
+    if (isEmailVerified) {
+      setVerificationStatusMessage('Email is already verified.');
+      setVerificationStatusType('success');
+      return;
+    }
+
+    try {
+      setVerificationBusy(true);
+      void trackAnalyticsEvent('profile_email_verification_resend_requested');
+      await sendEmailVerification(authUser, buildVerificationActionSettings());
+      setVerificationStatusMessage('Verification email sent. Check inbox and spam.');
+      setVerificationStatusType('success');
+      void trackAnalyticsEvent('profile_email_verification_resend_sent');
+    } catch (error) {
+      setVerificationStatusMessage(mapEmailVerificationError(error));
+      setVerificationStatusType('error');
+      void trackAnalyticsEvent('profile_email_verification_resend_failed', {
+        error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+      });
+    } finally {
+      setVerificationBusy(false);
+    }
+  };
+
+  const handleRefreshVerificationStatus = async () => {
+    setVerificationStatusMessage('');
+    setVerificationStatusType('');
+
+    if (!authUser || authUser.isAnonymous) {
+      setVerificationStatusMessage('No signed-in account found.');
+      setVerificationStatusType('error');
+      return;
+    }
+
+    try {
+      setVerificationBusy(true);
+      void trackAnalyticsEvent('profile_email_verification_refresh_requested');
+      await reload(authUser);
+      const verified = !!authUser.emailVerified;
+      setIsEmailVerified(verified);
+      if (verified) {
+        setVerificationStatusMessage('Email verified. Protected actions are now enabled.');
+        setVerificationStatusType('success');
+        void trackAnalyticsEvent('profile_email_verification_confirmed');
+      } else {
+        setVerificationStatusMessage('Email is still unverified. Verify from inbox, then refresh again.');
+        setVerificationStatusType('error');
+      }
+    } catch (error) {
+      setVerificationStatusMessage('Unable to refresh verification status right now.');
+      setVerificationStatusType('error');
+      void trackAnalyticsEvent('profile_email_verification_refresh_failed', {
+        error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+      });
+    } finally {
+      setVerificationBusy(false);
+    }
+  };
+
   const handlePasswordChange = async (event: React.FormEvent) => {
     event.preventDefault();
     setPasswordStatusMessage('');
@@ -491,6 +597,12 @@ export default function ProfilePage() {
 
     if (!authUser.email) {
       setPasswordStatusMessage('This account has no email/password sign-in method enabled.');
+      setPasswordStatusType('error');
+      return;
+    }
+
+    if (!isEmailVerified) {
+      setPasswordStatusMessage('Verify your email first to change password.');
       setPasswordStatusType('error');
       return;
     }
@@ -640,6 +752,18 @@ export default function ProfilePage() {
                     <p className="break-all text-sm text-[#e6e6e6]">{email}</p>
                   </div>
                   <div>
+                    <p className="text-xs uppercase tracking-[0.12em] text-[#8f8f8f]">Verification</p>
+                    <span
+                      className={`inline-flex rounded-md border px-2.5 py-1 text-[0.7rem] uppercase tracking-[0.1em] ${
+                        isEmailVerified
+                          ? 'border-[#5d4a1e] bg-[#1c1508] text-[#ecd7a2]'
+                          : 'border-[#5f2e2e] bg-[#1a0d0d] text-[#efc7c7]'
+                      }`}
+                    >
+                      {isEmailVerified ? 'Email Verified' : 'Email Not Verified'}
+                    </span>
+                  </div>
+                  <div>
                     <p className="text-xs uppercase tracking-[0.12em] text-[#8f8f8f]">User ID</p>
                     <p className="break-all text-xs text-[#cfcfcf]">{uid || 'Unavailable'}</p>
                   </div>
@@ -648,6 +772,44 @@ export default function ProfilePage() {
 
               <div className="rounded-2xl border border-[#3f3320] bg-[#0f0c07] p-5 space-y-3">
                 <p className="text-xs uppercase tracking-[0.14em] text-[#9f9f9f]">Security</p>
+                {!isEmailVerified && (
+                  <div className="rounded-lg border border-[#5f2e2e] bg-[#1a0d0d] p-3">
+                    <p className="text-xs text-[#efc7c7]">
+                      Verify your email to unlock password change and other protected account actions.
+                    </p>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        disabled={verificationBusy}
+                        onClick={handleResendVerificationEmail}
+                        className="rounded-lg border border-[#7f5f24] bg-[#1b1306] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#f0e1c3] hover:bg-[#2a1d09] disabled:opacity-60"
+                      >
+                        {verificationBusy ? 'Sending...' : 'Resend Email'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={verificationBusy}
+                        onClick={handleRefreshVerificationStatus}
+                        className="rounded-lg border border-[#3f3320] bg-[#141008] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#d9c8a2] hover:border-[#7f5f24] disabled:opacity-60"
+                      >
+                        {verificationBusy ? 'Checking...' : 'I Verified'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {verificationStatusMessage && (
+                  <div
+                    className={`rounded-lg border px-3 py-2 text-xs ${
+                      verificationStatusType === 'success'
+                        ? 'border-[#5d4a1e] bg-[#1c1508] text-[#ecd7a2]'
+                        : 'border-[#5f2e2e] bg-[#1a0d0d] text-[#efc7c7]'
+                    }`}
+                  >
+                    {verificationStatusMessage}
+                  </div>
+                )}
+
                 <button
                   type="button"
                   disabled={busy}
@@ -826,6 +988,11 @@ export default function ProfilePage() {
                 <p className="mt-1 text-sm text-[#b3b3b3]">
                   Re-authenticate with your current password, then set a new one.
                 </p>
+                {!isEmailVerified && (
+                  <div className="mt-3 rounded-lg border border-[#5f2e2e] bg-[#1a0d0d] px-3 py-2 text-xs text-[#efc7c7]">
+                    Email verification is required before password reset.
+                  </div>
+                )}
 
                 <form id="profile-change-password-form" className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={handlePasswordChange}>
                   <div className="md:col-span-2">
@@ -838,13 +1005,15 @@ export default function ProfilePage() {
                         type={showCurrentPassword ? 'text' : 'password'}
                         autoComplete="current-password"
                         value={currentPasswordInput}
+                        disabled={!isEmailVerified || passwordBusy}
                         onChange={(e) => setCurrentPasswordInput(e.target.value)}
-                        className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
+                        className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38] disabled:opacity-60"
                       />
                       <VisibilityToggleButton
                         shown={showCurrentPassword}
                         onToggle={() => setShowCurrentPassword((prev) => !prev)}
                         label={showCurrentPassword ? 'Hide current password' : 'Show current password'}
+                        disabled={!isEmailVerified || passwordBusy}
                       />
                     </div>
                   </div>
@@ -859,13 +1028,15 @@ export default function ProfilePage() {
                         type={showNewPassword ? 'text' : 'password'}
                         autoComplete="new-password"
                         value={newPasswordInput}
+                        disabled={!isEmailVerified || passwordBusy}
                         onChange={(e) => setNewPasswordInput(e.target.value)}
-                        className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
+                        className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38] disabled:opacity-60"
                       />
                       <VisibilityToggleButton
                         shown={showNewPassword}
                         onToggle={() => setShowNewPassword((prev) => !prev)}
                         label={showNewPassword ? 'Hide new password' : 'Show new password'}
+                        disabled={!isEmailVerified || passwordBusy}
                       />
                     </div>
                   </div>
@@ -880,8 +1051,9 @@ export default function ProfilePage() {
                         type={showConfirmPassword ? 'text' : 'password'}
                         autoComplete="new-password"
                         value={confirmPasswordInput}
+                        disabled={!isEmailVerified || passwordBusy}
                         onChange={(e) => setConfirmPasswordInput(e.target.value)}
-                        className={`w-full rounded-lg border bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors ${
+                        className={`w-full rounded-lg border bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors disabled:opacity-60 ${
                           passwordsMismatch
                             ? 'border-[#7a2f2f] focus:border-[#b45050]'
                             : passwordsMatch
@@ -893,6 +1065,7 @@ export default function ProfilePage() {
                         shown={showConfirmPassword}
                         onToggle={() => setShowConfirmPassword((prev) => !prev)}
                         label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                        disabled={!isEmailVerified || passwordBusy}
                       />
                     </div>
                     {passwordsMismatch && (

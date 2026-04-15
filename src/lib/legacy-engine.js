@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification, signOut, onAuthStateChanged, reload } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 export function initLegacyEngine() {
@@ -38,6 +38,8 @@ export function initLegacyEngine() {
             const authPasswordInput = document.getElementById('auth-password-input');
             const authStatusText = document.getElementById('auth-status-text');
             const authUserText = document.getElementById('auth-user-text');
+            const authVerificationText = document.getElementById('auth-verification-text');
+            const authResendVerificationBtn = document.getElementById('auth-resend-verification-btn');
             const ambientCore = document.getElementById('ambient-core');
             const cinematicTooltip = document.getElementById('cinematic-tooltip');
             
@@ -377,6 +379,7 @@ export function initLegacyEngine() {
 
             function updateAuthSessionUI() {
                 const isSignedIn = !!(user && !user.isAnonymous);
+                const isVerified = !!(user && !user.isAnonymous && user.emailVerified);
 
                 if (authLoggedOutView) {
                     authLoggedOutView.classList.toggle('auth-view-hidden', isSignedIn);
@@ -391,11 +394,32 @@ export function initLegacyEngine() {
                         : 'Not signed in';
                 }
 
+                if (authVerificationText) {
+                    authVerificationText.classList.remove('verified', 'unverified');
+                    if (isSignedIn) {
+                        if (isVerified) {
+                            authVerificationText.textContent = 'Email status: verified';
+                            authVerificationText.classList.add('verified');
+                        } else {
+                            authVerificationText.textContent = 'Email status: not verified';
+                            authVerificationText.classList.add('unverified');
+                        }
+                    } else {
+                        authVerificationText.textContent = '';
+                    }
+                }
+
+                if (authResendVerificationBtn) {
+                    const shouldHide = !isSignedIn || isVerified;
+                    authResendVerificationBtn.classList.toggle('auth-view-hidden', shouldHide);
+                    authResendVerificationBtn.disabled = shouldHide;
+                }
+
                 if (authSignOutBtn) {
                     authSignOutBtn.disabled = !isSignedIn;
                 }
                 if (authOpenProfileBtn) {
-                    authOpenProfileBtn.disabled = !isSignedIn;
+                    authOpenProfileBtn.disabled = !isSignedIn || !isVerified;
                 }
             }
 
@@ -409,6 +433,7 @@ export function initLegacyEngine() {
 
             function setAuthBusy(isBusy) {
                 const isSignedIn = !!(user && !user.isAnonymous);
+                const isVerified = !!(user && !user.isAnonymous && user.emailVerified);
                 if (authEmailInput) authEmailInput.disabled = isBusy;
                 if (authPasswordInput) authPasswordInput.disabled = isBusy;
                 if (authSubmitBtn) authSubmitBtn.disabled = isBusy;
@@ -416,7 +441,8 @@ export function initLegacyEngine() {
                 if (authSignInBtn) authSignInBtn.disabled = isBusy;
                 if (authSignUpBtn) authSignUpBtn.disabled = isBusy;
                 if (authSignOutBtn) authSignOutBtn.disabled = isBusy || !isSignedIn;
-                if (authOpenProfileBtn) authOpenProfileBtn.disabled = isBusy || !isSignedIn;
+                if (authOpenProfileBtn) authOpenProfileBtn.disabled = isBusy || !isSignedIn || !isVerified;
+                if (authResendVerificationBtn) authResendVerificationBtn.disabled = isBusy || !isSignedIn || isVerified;
                 if (authContinueChatBtn) authContinueChatBtn.disabled = isBusy;
             }
 
@@ -453,6 +479,25 @@ export function initLegacyEngine() {
                 return 'Unable to send reset email right now. Please try again.';
             }
 
+            function mapEmailVerificationError(error) {
+                const code = error && error.code ? String(error.code).toLowerCase() : '';
+                if (code.includes('too-many-requests')) return 'Too many verification requests. Please wait and retry.';
+                if (code.includes('invalid-email')) return 'This account email is invalid for verification.';
+                if (code.includes('missing-email')) return 'Account email is missing. Sign out and sign in again.';
+                if (code.includes('network-request-failed')) return 'Network error while sending verification email. Check connection and retry.';
+                if (code.includes('operation-not-allowed')) return 'Email verification is disabled in Firebase Auth settings.';
+                return 'Unable to send verification email right now. Please try again.';
+            }
+
+            function buildVerificationActionSettings() {
+                const verificationUrl = typeof window !== 'undefined'
+                    ? `${window.location.origin}/profile`
+                    : null;
+                return verificationUrl
+                    ? { url: verificationUrl, handleCodeInApp: false }
+                    : undefined;
+            }
+
             function redirectToProfile(signedInUser) {
                 if (!signedInUser) return;
                 trackEvent('profile_navigation_requested', {
@@ -478,7 +523,18 @@ export function initLegacyEngine() {
                 updateAuthCardSelection('signin');
                 const isSignedIn = !!(user && !user.isAnonymous);
                 if (isSignedIn) {
-                    setAuthStatus(`Signed in as ${user.email || 'account'}.`, 'success');
+                    try {
+                        await reload(user);
+                    } catch (_) {
+                        // Ignore verification refresh failures in overlay open flow.
+                    }
+                }
+                if (isSignedIn) {
+                    if (user.emailVerified) {
+                        setAuthStatus(`Signed in as ${user.email || 'account'}.`, 'success');
+                    } else {
+                        setAuthStatus('Signed in, but email is not verified yet. Verify email before opening profile.', 'error');
+                    }
                 } else {
                     setAuthStatus('');
                 }
@@ -530,10 +586,25 @@ export function initLegacyEngine() {
                     let credential = null;
                     if (pendingAuthIntent === 'signup') {
                         credential = await createUserWithEmailAndPassword(auth, email, password);
-                        setAuthStatus('Account created and signed in.', 'success');
+                        const verificationActionSettings = buildVerificationActionSettings();
+                        try {
+                            await sendEmailVerification(credential.user, verificationActionSettings);
+                            trackEvent('auth_email_verification_sent', { source: 'signup' });
+                        } catch (verificationError) {
+                            trackEvent('auth_email_verification_send_failed', {
+                                source: 'signup',
+                                error_code: getAuthErrorCode(verificationError)
+                            });
+                        }
+                        setAuthStatus('Account created. Verification email sent. Verify email before opening profile.', 'success');
                     } else {
                         credential = await signInWithEmailAndPassword(auth, email, password);
-                        setAuthStatus('Signed in successfully.', 'success');
+                        await reload(credential.user);
+                        if (credential.user.emailVerified) {
+                            setAuthStatus('Signed in successfully.', 'success');
+                        } else {
+                            setAuthStatus('Signed in, but email is not verified. Verify email before opening profile.', 'error');
+                        }
                     }
 
                     if (authPasswordInput) authPasswordInput.value = '';
@@ -543,7 +614,7 @@ export function initLegacyEngine() {
                     });
 
                     const signedInUser = credential?.user;
-                    if (signedInUser && !signedInUser.isAnonymous) {
+                    if (signedInUser && !signedInUser.isAnonymous && signedInUser.emailVerified) {
                         redirectToProfile(signedInUser);
                         return;
                     }
@@ -591,6 +662,42 @@ export function initLegacyEngine() {
                     setAuthStatus(mapPasswordResetError(resetError), 'error');
                     trackEvent('auth_password_reset_failed', {
                         error_code: getAuthErrorCode(resetError)
+                    });
+                } finally {
+                    setAuthBusy(false);
+                }
+            }
+
+            async function resendVerificationEmail() {
+                if (!auth || !user || user.isAnonymous) {
+                    setAuthStatus('Sign in with an email account first.', 'error');
+                    trackEvent('auth_email_verification_resend_failed', { reason: 'signed_out' });
+                    return;
+                }
+
+                if (!user.email) {
+                    setAuthStatus('Signed-in account does not have an email address.', 'error');
+                    trackEvent('auth_email_verification_resend_failed', { reason: 'missing_email' });
+                    return;
+                }
+
+                if (user.emailVerified) {
+                    setAuthStatus('Email is already verified. You can open profile now.', 'success');
+                    updateAuthSessionUI();
+                    return;
+                }
+
+                try {
+                    setAuthBusy(true);
+                    setAuthStatus('Sending verification email...');
+                    trackEvent('auth_email_verification_resend_requested');
+                    await sendEmailVerification(user, buildVerificationActionSettings());
+                    setAuthStatus('Verification email sent. Check inbox and spam.', 'success');
+                    trackEvent('auth_email_verification_resend_sent');
+                } catch (verificationError) {
+                    setAuthStatus(mapEmailVerificationError(verificationError), 'error');
+                    trackEvent('auth_email_verification_resend_failed', {
+                        error_code: getAuthErrorCode(verificationError)
                     });
                 } finally {
                     setAuthBusy(false);
@@ -826,9 +933,24 @@ export function initLegacyEngine() {
                 });
             }
 
+            if (authResendVerificationBtn) {
+                authResendVerificationBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await resendVerificationEmail();
+                });
+            }
+
             if (authOpenProfileBtn) {
                 authOpenProfileBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    if (!user || user.isAnonymous) {
+                        setAuthStatus('Sign in first to open profile.', 'error');
+                        return;
+                    }
+                    if (!user.emailVerified) {
+                        setAuthStatus('Verify your email before opening profile.', 'error');
+                        return;
+                    }
                     trackEvent('profile_navigation_requested', {
                         source: 'auth_card'
                     });

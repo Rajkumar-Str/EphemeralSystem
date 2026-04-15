@@ -704,6 +704,11 @@
             cursor: not-allowed;
         }
 
+        .auth-link-btn-inline {
+            text-align: left;
+            padding-top: 0.1rem;
+        }
+
         .auth-card-cta-row {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -771,6 +776,24 @@
             color: #8d8d8d;
             margin-top: 0.1rem;
         }
+
+        .auth-verification-text {
+            min-height: 1rem;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.74rem;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            color: #9f9f9f;
+        }
+
+        .auth-verification-text.verified {
+            color: #d8c18b;
+        }
+
+        .auth-verification-text.unverified {
+            color: #e4b4a0;
+        }
+
         @media (max-width: 768px) {
             .auth-card {
                 padding: 1.35rem;

@@ -100,6 +100,10 @@ export default function SystemUI() {
                     <div className="auth-loggedin-summary">
                         <p className="auth-loggedin-title">You are already signed in.</p>
                         <div id="auth-user-text" className="auth-user-text"></div>
+                        <div id="auth-verification-text" className="auth-verification-text"></div>
+                        <button id="auth-resend-verification-btn" className="auth-link-btn auth-link-btn-inline auth-view-hidden" type="button">
+                            Resend verification email
+                        </button>
                     </div>
                     <div className="auth-card-cta-row auth-card-cta-row-loggedin">
                         <button id="auth-open-profile-btn" className="auth-card-btn auth-card-btn-primary" type="button">Open profile</button>
