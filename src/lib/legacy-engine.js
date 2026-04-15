@@ -82,6 +82,28 @@ export function initLegacyEngine() {
             let appId = 'default-app-id';
             let chatsUnsubscribe = null;
 
+            function trackEvent(eventName, params = {}) {
+                try {
+                    const tracker = typeof window !== 'undefined' ? window.__trackAnalyticsEvent : null;
+                    if (typeof tracker === 'function') {
+                        void tracker(eventName, params);
+                    }
+                } catch (_) {
+                    // Ignore analytics bridge failures.
+                }
+            }
+
+            function getAuthState(userValue) {
+                if (!userValue) return 'signed_out';
+                return userValue.isAnonymous ? 'anonymous' : 'authenticated';
+            }
+
+            function getAuthErrorCode(error) {
+                return String(error?.code || error?.name || 'unknown')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9_./-]/g, '_');
+            }
+
             // --- Persistent Storage (Firebase Initialization) ---
             let user = null;
             let archives = [];
@@ -122,6 +144,9 @@ export function initLegacyEngine() {
 
                     onAuthStateChanged(auth, (u) => {
                         user = u;
+                        trackEvent('auth_state_changed', {
+                            auth_state: getAuthState(user)
+                        });
 
                         if (chatsUnsubscribe) {
                             chatsUnsubscribe();
@@ -135,6 +160,9 @@ export function initLegacyEngine() {
                                 snapshot.forEach(d => archives.push({ id: d.id, ...d.data() }));
                                 archives.sort((a, b) => b.updatedAt - a.updatedAt);
                                 buildChatsMenu();
+                                trackEvent('chat_archive_synced', {
+                                    archive_count: archives.length
+                                });
                             }, (error) => console.error("Archive sync error:", error));
                         } else {
                             archives = [];
@@ -160,12 +188,16 @@ export function initLegacyEngine() {
                             history: cleanHistory,
                             updatedAt: Date.now()
                         }, { merge: true });
+                        trackEvent('chat_archive_saved', {
+                            message_count: cleanHistory.length
+                        });
                     };
 
                     window.deleteFromArchive = async function(id) {
                         if (!user || !db || !id) return;
                         const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chats', id);
                         await deleteDoc(chatRef);
+                        trackEvent('chat_archive_deleted');
                     };
                 }
             } catch(e) {
@@ -409,6 +441,9 @@ export function initLegacyEngine() {
             }
             function redirectToProfile(signedInUser) {
                 if (!signedInUser) return;
+                trackEvent('profile_navigation_requested', {
+                    source: 'legacy_auth'
+                });
                 try {
                     localStorage.setItem('ephemeral_profile_user', JSON.stringify({
                         email: signedInUser.email || '',
@@ -425,6 +460,7 @@ export function initLegacyEngine() {
                     await showCommandResponse("Auth card UI is not loaded. Hard refresh once and try /auth again.");
                     return;
                 }
+                trackEvent('auth_card_opened');
                 updateAuthCardSelection('signin');
                 const isSignedIn = !!(user && !user.isAnonymous);
                 if (isSignedIn) {
@@ -442,31 +478,41 @@ export function initLegacyEngine() {
             function handleAuthChoice(intent) {
                 updateAuthCardSelection(intent);
                 setAuthStatus('');
+                trackEvent('auth_intent_selected', {
+                    auth_intent: intent === 'signup' ? 'signup' : 'signin'
+                });
             }
 
             async function submitAuthForm() {
                 if (!auth) {
                     setAuthStatus('Firebase auth is not initialized.', 'error');
+                    trackEvent('auth_submit_blocked', { reason: 'auth_unavailable' });
                     return;
                 }
 
                 const { email, password } = readAuthCredentials();
                 if (!email) {
                     setAuthStatus('Email is required.', 'error');
+                    trackEvent('auth_submit_blocked', { reason: 'missing_email' });
                     return;
                 }
                 if (!password) {
                     setAuthStatus('Password is required.', 'error');
+                    trackEvent('auth_submit_blocked', { reason: 'missing_password' });
                     return;
                 }
                 if (password.length < 6) {
                     setAuthStatus('Password must be at least 6 characters.', 'error');
+                    trackEvent('auth_submit_blocked', { reason: 'short_password' });
                     return;
                 }
 
                 try {
                     setAuthBusy(true);
                     setAuthStatus(pendingAuthIntent === 'signup' ? 'Creating account...' : 'Signing in...');
+                    trackEvent('auth_submit_requested', {
+                        auth_intent: pendingAuthIntent === 'signup' ? 'signup' : 'signin'
+                    });
                     let credential = null;
                     if (pendingAuthIntent === 'signup') {
                         credential = await createUserWithEmailAndPassword(auth, email, password);
@@ -478,6 +524,9 @@ export function initLegacyEngine() {
 
                     if (authPasswordInput) authPasswordInput.value = '';
                     updateAuthSessionUI();
+                    trackEvent('auth_submit_success', {
+                        auth_intent: pendingAuthIntent === 'signup' ? 'signup' : 'signin'
+                    });
 
                     const signedInUser = credential?.user;
                     if (signedInUser && !signedInUser.isAnonymous) {
@@ -486,6 +535,10 @@ export function initLegacyEngine() {
                     }
                 } catch (authError) {
                     setAuthStatus(mapAuthError(authError), 'error');
+                    trackEvent('auth_submit_failed', {
+                        auth_intent: pendingAuthIntent === 'signup' ? 'signup' : 'signin',
+                        error_code: getAuthErrorCode(authError)
+                    });
                 } finally {
                     setAuthBusy(false);
                 }
@@ -495,13 +548,18 @@ export function initLegacyEngine() {
                 if (!auth || !user || user.isAnonymous) return;
                 try {
                     setAuthBusy(true);
+                    trackEvent('auth_sign_out_requested');
                     await signOut(auth);
                     if (authEmailInput) authEmailInput.value = '';
                     if (authPasswordInput) authPasswordInput.value = '';
                     setAuthStatus('Signed out.', 'success');
                     updateAuthSessionUI();
+                    trackEvent('auth_sign_out_success');
                 } catch (authError) {
                     setAuthStatus(mapAuthError(authError), 'error');
+                    trackEvent('auth_sign_out_failed', {
+                        error_code: getAuthErrorCode(authError)
+                    });
                 } finally {
                     setAuthBusy(false);
                 }
@@ -546,7 +604,10 @@ export function initLegacyEngine() {
                 newChatItem.innerHTML = `<div class="tone-cmd" style="color: #EAEAEA;">+ NEW CONNECTION</div>`;
                 newChatItem.onclick = () => { 
                     closeOverlays();
-                    if (conversationHistory.length > 0) executeVoidReset(); 
+                    if (conversationHistory.length > 0) {
+                        trackEvent('chat_new_session_requested', { source: 'archives_overlay' });
+                        executeVoidReset();
+                    }
                 };
                 chatsList.appendChild(newChatItem);
 
@@ -558,6 +619,7 @@ export function initLegacyEngine() {
                     item.innerHTML = `<div class="overlay-cmd" style="${colorStyle}">${chat.title}</div>`;
                     item.onclick = () => { 
                         closeOverlays(); 
+                        trackEvent('chat_archive_selected', { source: 'archives_overlay' });
                         loadArchivedChat(chat.id); 
                     };
                     chatsList.appendChild(item);
@@ -567,6 +629,7 @@ export function initLegacyEngine() {
             function setPersona(id) {
                 if (!personas[id]) return;
                 currentPersonaId = id;
+                trackEvent('persona_changed', { persona_id: id });
                 ambientCore.className = 'state-typing';
                 setTimeout(() => { if (currentState === 'INPUT') ambientCore.className = 'state-idle'; }, 2000);
             }
@@ -630,9 +693,11 @@ export function initLegacyEngine() {
             function toggleOverlay(overlayElement, indicatorElement) {
                 if (!overlayElement) return;
                 const isActive = overlayElement.classList.contains('active');
+                const overlayId = String(overlayElement.id || 'unknown').replace(/[^a-z0-9_-]/gi, '_').toLowerCase();
                 if (!isActive) {
                     closeOverlays();
                     overlayElement.classList.add('active');
+                    trackEvent('overlay_opened', { overlay_id: overlayId });
                     if (indicatorElement) {
                         indicatorElement.innerText = 'X';
                         indicatorElement.style.opacity = '1';
@@ -641,6 +706,7 @@ export function initLegacyEngine() {
                     inputField.blur();
                 } else {
                     closeOverlays();
+                    trackEvent('overlay_closed', { overlay_id: overlayId });
                     if (currentState === 'INPUT') setTimeout(() => inputField.focus(), 10);
                 }
             }
@@ -703,6 +769,9 @@ export function initLegacyEngine() {
             if (authOpenProfileBtn) {
                 authOpenProfileBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    trackEvent('profile_navigation_requested', {
+                        source: 'auth_card'
+                    });
                     window.location.assign('/profile');
                 });
             }
@@ -710,6 +779,7 @@ export function initLegacyEngine() {
             if (authContinueChatBtn) {
                 authContinueChatBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    trackEvent('auth_continue_chat_clicked');
                     closeOverlays();
                     if (currentState === 'INPUT') inputField.focus();
                 });
@@ -781,6 +851,7 @@ export function initLegacyEngine() {
                 if (item && item.dataset.response) {
                     e.stopPropagation(); 
                     if (currentState === 'PROCESSING') return; 
+                    trackEvent('history_item_opened');
                     document.body.classList.add('state-reading');
                     inputField.blur();
                     displayResponse(item.dataset.response, true);
@@ -841,6 +912,9 @@ export function initLegacyEngine() {
 
                 currentChatId = id;
                 conversationHistory = chat.history;
+                trackEvent('chat_archive_opened', {
+                    message_count: Array.isArray(conversationHistory) ? conversationHistory.length : 0
+                });
                 webSnapshot = null;
                 lastWebQuery = '';
 
@@ -876,36 +950,45 @@ export function initLegacyEngine() {
             async function submitQuery(text) {
                 const rawText = String(text || '').replace(/\u200B/g, '').trim();
                 const queryText = rawText.toLowerCase();
-                if (queryText === '/help') { inputField.innerText = ''; toggleOverlay(helpOverlay, helpIndicator); return; }
-                if (queryText === '/tone') { inputField.innerText = ''; toggleOverlay(toneOverlay); return; }
-                if (queryText === '/chats') { inputField.innerText = ''; toggleOverlay(chatsOverlay, chatsIndicator); return; }
-                if (queryText === '/void') { executeVoidReset(); return; }
+                if (queryText === '/help') { trackEvent('command_executed', { command_name: 'help' }); inputField.innerText = ''; toggleOverlay(helpOverlay, helpIndicator); return; }
+                if (queryText === '/tone') { trackEvent('command_executed', { command_name: 'tone' }); inputField.innerText = ''; toggleOverlay(toneOverlay); return; }
+                if (queryText === '/chats') { trackEvent('command_executed', { command_name: 'chats' }); inputField.innerText = ''; toggleOverlay(chatsOverlay, chatsIndicator); return; }
+                if (queryText === '/void') { trackEvent('command_executed', { command_name: 'void' }); executeVoidReset(); return; }
                 if (queryText === '/del') { 
                     if (currentChatId && window.deleteFromArchive) window.deleteFromArchive(currentChatId);
+                    trackEvent('command_executed', { command_name: 'del' });
                     executeDeleteReset(); 
                     return; 
                 }
                 if (queryText === '/auth') {
+                    trackEvent('command_executed', { command_name: 'auth' });
                     inputField.innerText = '';
                     await openAuthCard();
                     return;
                 }
                 if (queryText === '/profile') {
+                    trackEvent('command_executed', { command_name: 'profile' });
                     inputField.innerText = '';
+                    trackEvent('profile_navigation_requested', {
+                        source: 'chat_command'
+                    });
                     window.location.assign('/profile');
                     return;
                 }
                 if (/^\/auth\s+/.test(queryText)) {
+                    trackEvent('command_executed', { command_name: 'auth_invalid' });
                     inputField.innerText = '';
                     await showCommandResponse("Usage: /auth");
                     return;
                 }
                 if (queryText === '/webstatus') {
+                    trackEvent('command_executed', { command_name: 'webstatus' });
                     inputField.innerText = '';
                     await showCommandResponse(formatWebStatusText());
                     return;
                 }
                 if (queryText === '/webclear') {
+                    trackEvent('command_executed', { command_name: 'webclear' });
                     inputField.innerText = '';
                     webSnapshot = null;
                     lastWebQuery = '';
@@ -916,14 +999,17 @@ export function initLegacyEngine() {
                 let promptText = rawText;
                 let useWebGrounding = false;
                 let shouldUpdateWebSnapshot = false;
+                let usedRefreshWebCommand = false;
 
                 if (queryText === '/web') {
+                    trackEvent('command_executed', { command_name: 'web_invalid' });
                     inputField.innerText = '';
                     await showCommandResponse("Usage: /web <question>. Example: /web latest ai news today");
                     return;
                 }
 
                 if (queryText.startsWith('/web ')) {
+                    trackEvent('command_executed', { command_name: 'web' });
                     promptText = rawText.substring(5).trim();
                     if (!promptText) {
                         inputField.innerText = '';
@@ -936,6 +1022,7 @@ export function initLegacyEngine() {
                 }
 
                 if (queryText === '/refreshweb' || queryText.startsWith('/refreshweb ')) {
+                    trackEvent('command_executed', { command_name: 'refreshweb' });
                     const explicitRefreshPrompt = rawText.substring('/refreshweb'.length).trim();
                     const cachedPrompt = getActiveWebSnapshot()?.query || lastWebQuery;
                     promptText = explicitRefreshPrompt || cachedPrompt || '';
@@ -947,13 +1034,21 @@ export function initLegacyEngine() {
                     useWebGrounding = true;
                     shouldUpdateWebSnapshot = true;
                     lastWebQuery = promptText;
+                    usedRefreshWebCommand = true;
                 }
 
                 // Initialize a new chat session if none exists
                 if (!currentChatId) {
                     currentChatId = Date.now().toString();
                     buildChatsMenu(); // show it in menu immediately
+                    trackEvent('chat_session_created');
                 }
+
+                trackEvent('chat_prompt_submitted', {
+                    prompt_length: promptText.length,
+                    uses_web_grounding: useWebGrounding,
+                    uses_refresh_command: usedRefreshWebCommand
+                });
 
                 currentState = 'PROCESSING';
                 ambientCore.className = 'state-processing';
@@ -1029,11 +1124,17 @@ export function initLegacyEngine() {
                     useWebGrounding,
                     shouldUpdateWebSnapshot
                 });
+                trackEvent('chat_response_received', {
+                    response_length: String(response || '').length,
+                    uses_web_grounding: useWebGrounding,
+                    grounded_source_count: Array.isArray(latestResponseMeta?.groundedSources) ? latestResponseMeta.groundedSources.length : 0
+                });
                 placeholder.dataset.response = response;
                 displayResponse(response, false);
             }
 
             function executeDeleteReset() {
+                trackEvent('chat_reset_triggered', { reset_type: 'delete' });
                 currentState = 'PROCESSING';
                 ambientCore.className = 'state-processing';
                 statusText.textContent = "Connection Eradicated";
@@ -1114,6 +1215,7 @@ export function initLegacyEngine() {
             }
 
             function executeVoidReset() {
+                trackEvent('chat_reset_triggered', { reset_type: 'void' });
                 currentState = 'PROCESSING';
                 ambientCore.className = 'state-processing';
                 statusText.textContent = "The Void Consumes";
@@ -1203,6 +1305,10 @@ export function initLegacyEngine() {
                     snapshotAgeMinutes: activeSnapshotForThisTurn ? Math.max(1, Math.round((Date.now() - activeSnapshotForThisTurn.capturedAt) / 60000)) : 0,
                     groundedSources: []
                 };
+                trackEvent('chat_model_request_started', {
+                    uses_web_grounding: useWebGrounding,
+                    used_cached_snapshot: !!activeSnapshotForThisTurn
+                });
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
                 
                 // CRITICAL FIX: Grab the live local date and time from the browser
@@ -1262,17 +1368,31 @@ export function initLegacyEngine() {
                                     ? "Grounded web request returned no readable text. Try /refreshweb or ask a narrower question."
                                     : "The model returned an empty answer. Please try again.";
                                 conversationHistory.push({ role: "model", parts: [{ text: emptyText }] });
+                                trackEvent('chat_model_empty_response', {
+                                    uses_web_grounding: useWebGrounding,
+                                    model_id: modelId
+                                });
                                 return emptyText;
                             }
                             conversationHistory.push({ role: "model", parts: [{ text: aiText }] });
+                            trackEvent('chat_model_success', {
+                                uses_web_grounding: useWebGrounding,
+                                model_id: modelId
+                            });
                             if (useWebGrounding && shouldUpdateWebSnapshot) {
                                 updateWebSnapshot(query, aiText, topCandidate?.groundingMetadata);
                                 latestResponseMeta.groundedSources = extractGroundedSources(topCandidate?.groundingMetadata);
+                                trackEvent('web_snapshot_updated', {
+                                    source_count: latestResponseMeta.groundedSources.length
+                                });
                             }
                             
                             // Fire off the background save to Archives
                             if (window.saveToArchive) {
-                                window.saveToArchive().catch(e => console.error(e));
+                                window.saveToArchive().catch(e => {
+                                    trackEvent('chat_archive_save_failed');
+                                    console.error(e);
+                                });
                             }
                             
                             return aiText;
@@ -1298,6 +1418,10 @@ export function initLegacyEngine() {
                                 ? "Current grounded model is unavailable for this key/project. Switch to another supported grounded model."
                                 : "Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.";
                     conversationHistory.push({ role: "model", parts: [{ text: webFallbackText }] });
+                    trackEvent('chat_model_failed', {
+                        uses_web_grounding: true,
+                        status_code: lastStatusCode || 0
+                    });
                     if (lastFailureMessage) console.error("Grounded request failed:", lastFailureMessage);
                     return webFallbackText;
                 }
@@ -1310,6 +1434,10 @@ export function initLegacyEngine() {
                             ? "Configured chat model is unavailable for this key/project."
                             : "The AI model is temporarily unavailable right now. Please try again in a moment.";
                 conversationHistory.push({ role: "model", parts: [{ text: chatFallbackText }] });
+                trackEvent('chat_model_failed', {
+                    uses_web_grounding: false,
+                    status_code: lastStatusCode || 0
+                });
                 if (lastFailureMessage) console.error("Chat request failed:", lastFailureMessage);
                 return chatFallbackText;
             }

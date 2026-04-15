@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { auth, db } from '../lib/firebase-config';
+import { auth, db, trackAnalyticsEvent } from '../lib/firebase-config';
 
 type ProfileState = 'loading' | 'ready' | 'guest';
 
@@ -159,6 +159,7 @@ function mapFirestoreSyncError(error: unknown, fallbackMessage: string): string 
 }
 
 export default function ProfilePage() {
+  const editedFieldsRef = useRef<Set<ProfileField>>(new Set());
   const initialProfile = useMemo(() => {
     if (typeof window === 'undefined') return { email: '', uid: '' };
     return readStoredProfile();
@@ -188,6 +189,7 @@ export default function ProfilePage() {
     let isMounted = true;
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user && !user.isAnonymous) {
+        void trackAnalyticsEvent('profile_auth_state', { state: 'authenticated' });
         setStatus('loading');
         setEmail(user.email || 'No email available');
         setUid(user.uid || '');
@@ -249,6 +251,7 @@ export default function ProfilePage() {
         };
         void loadRemoteProfile();
       } else {
+        void trackAnalyticsEvent('profile_auth_state', { state: 'guest' });
         setStatus('guest');
         setIsRemoteLoaded(false);
       }
@@ -315,6 +318,10 @@ export default function ProfilePage() {
   const isFieldConfirmed = (field: ProfileField) => !!confirmedFields[field];
 
   const handleDetailChange = (field: ProfileField, value: string) => {
+    if (!editedFieldsRef.current.has(field)) {
+      editedFieldsRef.current.add(field);
+      void trackAnalyticsEvent('profile_field_edited', { field_name: field });
+    }
     setDetails((prev) => ({ ...prev, [field]: value }));
     setConfirmedFields((prev) => {
       if (!prev[field]) return prev;
@@ -322,8 +329,14 @@ export default function ProfilePage() {
     });
   };
 
+  const handleFieldFocus = (field: ProfileField) => {
+    setActiveField(field);
+    void trackAnalyticsEvent('profile_field_focus', { field_name: field });
+  };
+
   const handleConfirmField = (field: ProfileField) => {
     if (!isFieldFilled(field)) return;
+    void trackAnalyticsEvent('profile_field_confirmed', { field_name: field });
     setConfirmedFields((prev) => ({ ...prev, [field]: true }));
     setActiveField(null);
     if (document.activeElement instanceof HTMLElement) {
@@ -331,16 +344,27 @@ export default function ProfilePage() {
     }
   };
 
+  const handleBackToChat = () => {
+    void trackAnalyticsEvent('profile_back_to_chat');
+    window.location.assign('/');
+  };
+
   const handleSignOut = async () => {
     try {
       setBusy(true);
+      void trackAnalyticsEvent('profile_sign_out_requested');
       await signOut(auth);
+      void trackAnalyticsEvent('profile_sign_out_success');
       try {
         localStorage.removeItem(PROFILE_USER_KEY);
       } catch {
         // Ignore storage failures silently.
       }
       window.location.assign('/');
+    } catch (error) {
+      void trackAnalyticsEvent('profile_sign_out_failed', {
+        error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+      });
     } finally {
       setBusy(false);
     }
@@ -385,7 +409,7 @@ export default function ProfilePage() {
           </div>
           <button
             type="button"
-            onClick={() => window.location.assign('/')}
+            onClick={handleBackToChat}
             className="rounded-lg border border-[#7f5f24] bg-[#1b1306] px-4 py-2 text-sm text-[#f0e1c3] hover:bg-[#2a1d09]"
           >
             Back To Chat
@@ -475,7 +499,7 @@ export default function ProfilePage() {
                       <input
                         value={details.displayName}
                         onChange={(e) => handleDetailChange('displayName', e.target.value)}
-                        onFocus={() => setActiveField('displayName')}
+                        onFocus={() => handleFieldFocus('displayName')}
                         onBlur={() => setActiveField((prev) => (prev === 'displayName' ? null : prev))}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-11 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                         placeholder="How should we call you?"
@@ -490,7 +514,7 @@ export default function ProfilePage() {
                       <input
                         value={details.role}
                         onChange={(e) => handleDetailChange('role', e.target.value)}
-                        onFocus={() => setActiveField('role')}
+                        onFocus={() => handleFieldFocus('role')}
                         onBlur={() => setActiveField((prev) => (prev === 'role' ? null : prev))}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-11 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                         placeholder="Student, founder, engineer..."
@@ -523,7 +547,7 @@ export default function ProfilePage() {
                       <input
                         value={details.location}
                         onChange={(e) => handleDetailChange('location', e.target.value)}
-                        onFocus={() => setActiveField('location')}
+                        onFocus={() => handleFieldFocus('location')}
                         onBlur={() => setActiveField((prev) => (prev === 'location' ? null : prev))}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-11 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                         placeholder="City, Country"
@@ -538,7 +562,7 @@ export default function ProfilePage() {
                       <input
                         value={details.timezone}
                         onChange={(e) => handleDetailChange('timezone', e.target.value)}
-                        onFocus={() => setActiveField('timezone')}
+                        onFocus={() => handleFieldFocus('timezone')}
                         onBlur={() => setActiveField((prev) => (prev === 'timezone' ? null : prev))}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-11 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                         placeholder="UTC+05:30"
@@ -553,7 +577,7 @@ export default function ProfilePage() {
                       <input
                         value={details.website}
                         onChange={(e) => handleDetailChange('website', e.target.value)}
-                        onFocus={() => setActiveField('website')}
+                        onFocus={() => handleFieldFocus('website')}
                         onBlur={() => setActiveField((prev) => (prev === 'website' ? null : prev))}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-11 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                         placeholder="https://..."
@@ -568,7 +592,7 @@ export default function ProfilePage() {
                       <input
                         value={details.github}
                         onChange={(e) => handleDetailChange('github', e.target.value)}
-                        onFocus={() => setActiveField('github')}
+                        onFocus={() => handleFieldFocus('github')}
                         onBlur={() => setActiveField((prev) => (prev === 'github' ? null : prev))}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-11 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                         placeholder="github.com/username"
@@ -588,7 +612,7 @@ export default function ProfilePage() {
                       <input
                         value={details.primaryGoal}
                         onChange={(e) => handleDetailChange('primaryGoal', e.target.value)}
-                        onFocus={() => setActiveField('primaryGoal')}
+                        onFocus={() => handleFieldFocus('primaryGoal')}
                         onBlur={() => setActiveField((prev) => (prev === 'primaryGoal' ? null : prev))}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-11 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                         placeholder="What should the AI help with most?"
