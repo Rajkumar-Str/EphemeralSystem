@@ -41,6 +41,10 @@ export function initLegacyEngine() {
             const authUserText = document.getElementById('auth-user-text');
             const authVerificationText = document.getElementById('auth-verification-text');
             const authResendVerificationBtn = document.getElementById('auth-resend-verification-btn');
+            const authPasswordStrengthWrap = document.getElementById('auth-password-strength-wrap');
+            const authPasswordStrengthLabel = document.getElementById('auth-password-strength-label');
+            const authPasswordMeterFill = document.getElementById('auth-password-meter-fill');
+            const authPasswordPolicyHints = document.getElementById('auth-password-policy-hints');
             const ambientCore = document.getElementById('ambient-core');
             const cinematicTooltip = document.getElementById('cinematic-tooltip');
             
@@ -430,6 +434,8 @@ export function initLegacyEngine() {
                 if (authSignInBtn) authSignInBtn.classList.toggle('selected', !isSignUp);
                 if (authSignUpBtn) authSignUpBtn.classList.toggle('selected', isSignUp);
                 if (authSubmitBtn) authSubmitBtn.textContent = isSignUp ? 'Create account' : 'Sign in';
+                if (authPasswordInput) authPasswordInput.autocomplete = isSignUp ? 'new-password' : 'current-password';
+                updateAuthPasswordPolicyUI();
             }
 
             function setAuthBusy(isBusy) {
@@ -452,6 +458,59 @@ export function initLegacyEngine() {
                 const email = authEmailInput ? String(authEmailInput.value || '').trim() : '';
                 const password = authPasswordInput ? String(authPasswordInput.value || '').trim() : '';
                 return { email, password };
+            }
+
+            function evaluatePasswordPolicy(passwordValue) {
+                const password = String(passwordValue || '');
+                const checks = {
+                    minLength: password.length >= 8,
+                    hasLower: /[a-z]/.test(password),
+                    hasUpper: /[A-Z]/.test(password),
+                    hasNumber: /\d/.test(password),
+                    hasSymbol: /[^A-Za-z0-9]/.test(password)
+                };
+                const score = Object.values(checks).filter(Boolean).length;
+                const meetsPolicy = checks.minLength && checks.hasLower && checks.hasUpper && checks.hasNumber;
+                let label = 'Very weak';
+                if (score >= 5) label = 'Very strong';
+                else if (score === 4) label = 'Strong';
+                else if (score === 3) label = 'Fair';
+                else if (score === 2) label = 'Weak';
+                return {
+                    checks,
+                    score,
+                    meetsPolicy,
+                    label
+                };
+            }
+
+            function updateAuthPasswordPolicyUI() {
+                const isSignUp = pendingAuthIntent === 'signup';
+                if (authPasswordStrengthWrap) {
+                    authPasswordStrengthWrap.classList.toggle('auth-view-hidden', !isSignUp);
+                }
+                if (!isSignUp) return;
+
+                const policy = evaluatePasswordPolicy(authPasswordInput ? authPasswordInput.value : '');
+                if (authPasswordStrengthLabel) {
+                    authPasswordStrengthLabel.textContent = policy.label;
+                }
+                if (authPasswordMeterFill) {
+                    authPasswordMeterFill.style.width = `${Math.round((policy.score / 5) * 100)}%`;
+                    if (policy.score >= 4) authPasswordMeterFill.style.background = '#5f6f3a';
+                    else if (policy.score >= 3) authPasswordMeterFill.style.background = '#9a7a38';
+                    else authPasswordMeterFill.style.background = '#7a2f2f';
+                }
+                if (authPasswordPolicyHints) {
+                    const mark = (ok) => (ok ? '✓' : '•');
+                    authPasswordPolicyHints.textContent = [
+                        `${mark(policy.checks.minLength)} 8+ characters`,
+                        `${mark(policy.checks.hasLower)} lowercase letter`,
+                        `${mark(policy.checks.hasUpper)} uppercase letter`,
+                        `${mark(policy.checks.hasNumber)} number`,
+                        `${mark(policy.checks.hasSymbol)} symbol (recommended)`
+                    ].join('\n');
+                }
             }
 
             function mapAuthError(error) {
@@ -612,7 +671,16 @@ export function initLegacyEngine() {
                     trackEvent('auth_submit_blocked', { reason: 'missing_password' });
                     return;
                 }
-                if (password.length < 6) {
+
+                const passwordPolicy = evaluatePasswordPolicy(password);
+                if (pendingAuthIntent === 'signup' && !passwordPolicy.meetsPolicy) {
+                    setAuthStatus('Password policy: 8+ chars with uppercase, lowercase, and number.', 'error');
+                    trackEvent('auth_submit_blocked', { reason: 'password_policy_failed' });
+                    updateAuthPasswordPolicyUI();
+                    return;
+                }
+
+                if (pendingAuthIntent !== 'signup' && password.length < 6) {
                     setAuthStatus('Password must be at least 6 characters.', 'error');
                     trackEvent('auth_submit_blocked', { reason: 'short_password' });
                     return;
@@ -1064,6 +1132,7 @@ export function initLegacyEngine() {
 
             if (authEmailInput) authEmailInput.addEventListener('keydown', authEnterHandler);
             if (authPasswordInput) authPasswordInput.addEventListener('keydown', authEnterHandler);
+            if (authPasswordInput) authPasswordInput.addEventListener('input', updateAuthPasswordPolicyUI);
             helpOverlay.addEventListener('click', closeOverlays);
             toneOverlay.addEventListener('click', closeOverlays);
             chatsOverlay.addEventListener('click', closeOverlays);

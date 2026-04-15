@@ -5,6 +5,25 @@ import { auth, trackAnalyticsEvent } from '../lib/firebase-config';
 type AuthActionMode = '' | 'resetPassword' | 'verifyEmail';
 type ResetState = 'checking' | 'ready' | 'invalid' | 'success' | 'verified';
 
+function evaluatePasswordPolicy(passwordValue: string) {
+  const password = String(passwordValue || '');
+  const checks = {
+    minLength: password.length >= 8,
+    hasLower: /[a-z]/.test(password),
+    hasUpper: /[A-Z]/.test(password),
+    hasNumber: /\d/.test(password),
+    hasSymbol: /[^A-Za-z0-9]/.test(password),
+  };
+  const score = Object.values(checks).filter(Boolean).length;
+  const meetsPolicy = checks.minLength && checks.hasLower && checks.hasUpper && checks.hasNumber;
+  let label = 'Very weak';
+  if (score >= 5) label = 'Very strong';
+  else if (score === 4) label = 'Strong';
+  else if (score === 3) label = 'Fair';
+  else if (score === 2) label = 'Weak';
+  return { checks, score, meetsPolicy, label };
+}
+
 function VisibilityToggleButton({
   shown,
   onToggle,
@@ -77,7 +96,7 @@ function mapEmailVerificationActionError(error: unknown): string {
 
 function mapConfirmError(error: unknown): string {
   const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
-  if (code.includes('weak-password')) return 'New password is too weak. Use at least 6 characters.';
+  if (code.includes('weak-password')) return 'New password is too weak. Use 8+ chars with uppercase, lowercase, and number.';
   if (code.includes('expired-action-code')) return 'This reset link has expired. Request a new one.';
   if (code.includes('invalid-action-code')) return 'This reset link is invalid or already used.';
   if (code.includes('network-request-failed')) return 'Network error while updating password. Check connection and retry.';
@@ -129,11 +148,12 @@ export default function PasswordResetPage() {
   const [confirmNewPasswordFocused, setConfirmNewPasswordFocused] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Checking action link...');
   const [busy, setBusy] = useState(false);
+  const passwordPolicy = evaluatePasswordPolicy(newPassword);
   const passwordsMatch = newPassword.length > 0 && confirmNewPassword.length > 0 && newPassword === confirmNewPassword;
   const passwordsMismatch = confirmNewPassword.length > 0 && newPassword !== confirmNewPassword;
   const canSubmit =
     !busy &&
-    newPassword.length >= 6 &&
+    passwordPolicy.meetsPolicy &&
     confirmNewPassword.length > 0 &&
     newPassword === confirmNewPassword;
 
@@ -197,8 +217,8 @@ export default function PasswordResetPage() {
     const password = String(newPassword || '');
     const confirm = String(confirmNewPassword || '');
 
-    if (password.length < 6) {
-      setStatusMessage('New password must be at least 6 characters.');
+    if (!passwordPolicy.meetsPolicy) {
+      setStatusMessage('Password policy: 8+ chars with uppercase, lowercase, and number.');
       return;
     }
 
@@ -249,6 +269,18 @@ export default function PasswordResetPage() {
     : resetState === 'success'
       ? 'Continue'
       : 'Back To Chat';
+  const strengthToneClass =
+    passwordPolicy.score >= 4
+      ? 'text-[#bdda93]'
+      : passwordPolicy.score >= 3
+        ? 'text-[#e7c37b]'
+        : 'text-[#e2a3a3]';
+  const strengthMeterClass =
+    passwordPolicy.score >= 4
+      ? 'bg-[#5f6f3a]'
+      : passwordPolicy.score >= 3
+        ? 'bg-[#9a7a38]'
+        : 'bg-[#7a2f2f]';
 
   return (
     <div className="min-h-screen bg-[#020101] text-[#EAEAEA] px-4 py-8">
@@ -292,6 +324,26 @@ export default function PasswordResetPage() {
                   label={showNewPassword ? 'Hide new password' : 'Show new password'}
                   visible={newPasswordFocused}
                 />
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-[#3f3320] bg-[#0f0c07] p-3">
+              <div className="flex items-center justify-between text-[0.68rem] uppercase tracking-[0.08em] text-[#9f9f9f]">
+                <span>Password strength</span>
+                <span className={strengthToneClass}>{passwordPolicy.label}</span>
+              </div>
+              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full border border-[#2f2412] bg-[#17110a]">
+                <div
+                  className={`h-full rounded-full transition-all ${strengthMeterClass}`}
+                  style={{ width: `${Math.round((passwordPolicy.score / 5) * 100)}%` }}
+                />
+              </div>
+              <div className="mt-2 grid gap-1 text-[0.7rem] text-[#a9a9a9]">
+                <p className={passwordPolicy.checks.minLength ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.minLength ? '✓' : '•'} 8+ characters</p>
+                <p className={passwordPolicy.checks.hasLower ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasLower ? '✓' : '•'} lowercase letter</p>
+                <p className={passwordPolicy.checks.hasUpper ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasUpper ? '✓' : '•'} uppercase letter</p>
+                <p className={passwordPolicy.checks.hasNumber ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasNumber ? '✓' : '•'} number</p>
+                <p className={passwordPolicy.checks.hasSymbol ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasSymbol ? '✓' : '•'} symbol (recommended)</p>
               </div>
             </div>
 

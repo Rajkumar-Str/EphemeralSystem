@@ -89,6 +89,16 @@ export default function SystemUI() {
                         <input id="auth-email-input" className="auth-field-input" type="email" autoComplete="email" />
                         <label className="auth-field-label" htmlFor="auth-password-input">Password</label>
                         <input id="auth-password-input" className="auth-field-input" type="password" autoComplete="current-password" />
+                        <div id="auth-password-strength-wrap" className="auth-password-strength auth-view-hidden">
+                            <div className="auth-password-strength-row">
+                                <span>Password strength</span>
+                                <span id="auth-password-strength-label">Very weak</span>
+                            </div>
+                            <div className="auth-password-meter-track">
+                                <div id="auth-password-meter-fill" className="auth-password-meter-fill"></div>
+                            </div>
+                            <div id="auth-password-policy-hints" className="auth-password-policy-hints"></div>
+                        </div>
                         <button id="auth-forgot-password-btn" className="auth-link-btn" type="button">Forgot password?</button>
                     </div>
                     <div className="auth-card-cta-row">

@@ -177,7 +177,7 @@ function mapPasswordUpdateError(error: unknown): string {
     return 'Current password is incorrect.';
   }
   if (code.includes('weak-password')) {
-    return 'New password is too weak. Use at least 6 characters.';
+    return 'New password is too weak. Use 8+ chars with uppercase, lowercase, and number.';
   }
   if (code.includes('too-many-requests')) {
     return 'Too many attempts. Please wait and try again.';
@@ -189,6 +189,25 @@ function mapPasswordUpdateError(error: unknown): string {
     return 'Session expired for security. Sign in again and retry.';
   }
   return 'Unable to update password right now. Please try again.';
+}
+
+function evaluatePasswordPolicy(passwordValue: string) {
+  const password = String(passwordValue || '');
+  const checks = {
+    minLength: password.length >= 8,
+    hasLower: /[a-z]/.test(password),
+    hasUpper: /[A-Z]/.test(password),
+    hasNumber: /\d/.test(password),
+    hasSymbol: /[^A-Za-z0-9]/.test(password),
+  };
+  const score = Object.values(checks).filter(Boolean).length;
+  const meetsPolicy = checks.minLength && checks.hasLower && checks.hasUpper && checks.hasNumber;
+  let label = 'Very weak';
+  if (score >= 5) label = 'Very strong';
+  else if (score === 4) label = 'Strong';
+  else if (score === 3) label = 'Fair';
+  else if (score === 2) label = 'Weak';
+  return { checks, score, meetsPolicy, label };
 }
 
 function mapEmailVerificationError(error: unknown): string {
@@ -367,6 +386,7 @@ export default function ProfilePage() {
   const passwordsMismatch =
     confirmPasswordInput.length > 0 &&
     newPasswordInput !== confirmPasswordInput;
+  const passwordPolicy = evaluatePasswordPolicy(newPasswordInput);
   const canSubmitPasswordChange =
     !passwordBusy &&
     !verificationBusy &&
@@ -374,9 +394,21 @@ export default function ProfilePage() {
     !busy &&
     isEmailVerified &&
     currentPasswordInput.length > 0 &&
-    newPasswordInput.length >= 6 &&
+    passwordPolicy.meetsPolicy &&
     confirmPasswordInput.length > 0 &&
     newPasswordInput === confirmPasswordInput;
+  const strengthToneClass =
+    passwordPolicy.score >= 4
+      ? 'text-[#bdda93]'
+      : passwordPolicy.score >= 3
+        ? 'text-[#e7c37b]'
+        : 'text-[#e2a3a3]';
+  const strengthMeterClass =
+    passwordPolicy.score >= 4
+      ? 'bg-[#5f6f3a]'
+      : passwordPolicy.score >= 3
+        ? 'bg-[#9a7a38]'
+        : 'bg-[#7a2f2f]';
 
   useEffect(() => {
     let isMounted = true;
@@ -874,8 +906,8 @@ export default function ProfilePage() {
       return;
     }
 
-    if (newPasswordInput.length < 6) {
-      setPasswordStatusMessage('New password must be at least 6 characters.');
+    if (!passwordPolicy.meetsPolicy) {
+      setPasswordStatusMessage('Password policy: 8+ chars with uppercase, lowercase, and number.');
       setPasswordStatusType('error');
       return;
     }
@@ -1320,6 +1352,26 @@ export default function ProfilePage() {
                         disabled={!isEmailVerified || passwordBusy || deleteBusy}
                         visible={newPasswordFocused}
                       />
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-2 rounded-lg border border-[#3f3320] bg-[#0f0c07] p-3">
+                    <div className="flex items-center justify-between text-[0.68rem] uppercase tracking-[0.08em] text-[#9f9f9f]">
+                      <span>Password strength</span>
+                      <span className={strengthToneClass}>{passwordPolicy.label}</span>
+                    </div>
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full border border-[#2f2412] bg-[#17110a]">
+                      <div
+                        className={`h-full rounded-full transition-all ${strengthMeterClass}`}
+                        style={{ width: `${Math.round((passwordPolicy.score / 5) * 100)}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 grid gap-1 text-[0.7rem] text-[#a9a9a9]">
+                      <p className={passwordPolicy.checks.minLength ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.minLength ? '✓' : '•'} 8+ characters</p>
+                      <p className={passwordPolicy.checks.hasLower ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasLower ? '✓' : '•'} lowercase letter</p>
+                      <p className={passwordPolicy.checks.hasUpper ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasUpper ? '✓' : '•'} uppercase letter</p>
+                      <p className={passwordPolicy.checks.hasNumber ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasNumber ? '✓' : '•'} number</p>
+                      <p className={passwordPolicy.checks.hasSymbol ? 'text-[#bdda93]' : ''}>{passwordPolicy.checks.hasSymbol ? '✓' : '•'} symbol (recommended)</p>
                     </div>
                   </div>
 
