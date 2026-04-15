@@ -4,6 +4,7 @@ import SystemUI from '../components/system-ui';
 import MemoryCanvas from '../components/memory-canvas';
 import ChatStage from '../components/chat-stage';
 import ProfilePage from '../components/profile-page';
+import PasswordResetPage from '../components/password-reset-page';
 import { initLegacyEngine } from '../lib/legacy-engine';
 import { getAnalyticsInstance, trackAnalyticsEvent } from '../lib/firebase-config';
 
@@ -44,6 +45,7 @@ export default function Page() {
   });
 
   const isProfileRoute = pathname === '/profile';
+  const isResetPasswordRoute = pathname === '/reset-password';
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -99,9 +101,9 @@ export default function Page() {
     // Track route changes for SPA navigation visibility in Analytics.
     void trackAnalyticsEvent('route_change', {
       route_path: pathname,
-      route_type: pathname === '/profile' ? 'profile' : 'chat',
+      route_type: isProfileRoute ? 'profile' : isResetPasswordRoute ? 'reset_password' : 'chat',
     });
-  }, [pathname]);
+  }, [pathname, isProfileRoute, isResetPasswordRoute]);
 
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -134,15 +136,19 @@ export default function Page() {
   }, [pathname]);
 
   useEffect(() => {
-    if (isProfileRoute) return;
+    if (isProfileRoute || isResetPasswordRoute) return;
     if (!initialized.current) {
       initialized.current = true;
       initLegacyEngine();
     }
-  }, [isProfileRoute]);
+  }, [isProfileRoute, isResetPasswordRoute]);
 
   if (isProfileRoute) {
     return <ProfilePage />;
+  }
+
+  if (isResetPasswordRoute) {
+    return <PasswordResetPage />;
   }
 
   return (

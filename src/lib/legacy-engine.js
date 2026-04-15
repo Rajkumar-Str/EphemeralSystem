@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 export function initLegacyEngine() {
@@ -28,6 +28,7 @@ export function initLegacyEngine() {
             const authSignInBtn = document.getElementById('auth-signin-btn');
             const authSignUpBtn = document.getElementById('auth-signup-btn');
             const authSubmitBtn = document.getElementById('auth-submit-btn');
+            const authForgotPasswordBtn = document.getElementById('auth-forgot-password-btn');
             const authSignOutBtn = document.getElementById('auth-signout-btn');
             const authOpenProfileBtn = document.getElementById('auth-open-profile-btn');
             const authContinueChatBtn = document.getElementById('auth-continue-chat-btn');
@@ -411,6 +412,7 @@ export function initLegacyEngine() {
                 if (authEmailInput) authEmailInput.disabled = isBusy;
                 if (authPasswordInput) authPasswordInput.disabled = isBusy;
                 if (authSubmitBtn) authSubmitBtn.disabled = isBusy;
+                if (authForgotPasswordBtn) authForgotPasswordBtn.disabled = isBusy;
                 if (authSignInBtn) authSignInBtn.disabled = isBusy;
                 if (authSignUpBtn) authSignUpBtn.disabled = isBusy;
                 if (authSignOutBtn) authSignOutBtn.disabled = isBusy || !isSignedIn;
@@ -439,6 +441,18 @@ export function initLegacyEngine() {
                 if (code.includes('operation-not-allowed')) return 'Enable Email/Password in Firebase Auth settings.';
                 return 'Authentication failed. Check credentials and try again.';
             }
+
+            function mapPasswordResetError(error) {
+                const code = error && error.code ? String(error.code).toLowerCase() : '';
+                if (code.includes('invalid-email')) return 'Enter a valid email address.';
+                if (code.includes('missing-email')) return 'Email is required before sending reset link.';
+                if (code.includes('too-many-requests')) return 'Too many reset attempts. Please wait a moment and try again.';
+                if (code.includes('network-request-failed')) return 'Network error while sending reset email. Check connection and retry.';
+                if (code.includes('operation-not-allowed')) return 'Password sign-in is disabled in Firebase Auth settings.';
+                if (code.includes('configuration-not-found')) return 'Firebase Auth configuration is incomplete. Check Firebase setup.';
+                return 'Unable to send reset email right now. Please try again.';
+            }
+
             function redirectToProfile(signedInUser) {
                 if (!signedInUser) return;
                 trackEvent('profile_navigation_requested', {
@@ -538,6 +552,45 @@ export function initLegacyEngine() {
                     trackEvent('auth_submit_failed', {
                         auth_intent: pendingAuthIntent === 'signup' ? 'signup' : 'signin',
                         error_code: getAuthErrorCode(authError)
+                    });
+                } finally {
+                    setAuthBusy(false);
+                }
+            }
+
+            async function requestPasswordReset() {
+                if (!auth) {
+                    setAuthStatus('Firebase auth is not initialized.', 'error');
+                    trackEvent('auth_password_reset_failed', { reason: 'auth_unavailable' });
+                    return;
+                }
+
+                const { email } = readAuthCredentials();
+                if (!email) {
+                    setAuthStatus('Enter your email first, then click Forgot password.', 'error');
+                    trackEvent('auth_password_reset_failed', { reason: 'missing_email' });
+                    return;
+                }
+
+                try {
+                    setAuthBusy(true);
+                    setAuthStatus('Sending password reset link...');
+                    trackEvent('auth_password_reset_requested');
+
+                    const resetUrl = typeof window !== 'undefined'
+                        ? `${window.location.origin}/reset-password`
+                        : null;
+                    const actionCodeSettings = resetUrl
+                        ? { url: resetUrl, handleCodeInApp: false }
+                        : undefined;
+                    await sendPasswordResetEmail(auth, email, actionCodeSettings);
+
+                    setAuthStatus('If an account exists for this email, a reset link has been sent. Check inbox and spam.', 'success');
+                    trackEvent('auth_password_reset_sent');
+                } catch (resetError) {
+                    setAuthStatus(mapPasswordResetError(resetError), 'error');
+                    trackEvent('auth_password_reset_failed', {
+                        error_code: getAuthErrorCode(resetError)
                     });
                 } finally {
                     setAuthBusy(false);
@@ -756,6 +809,13 @@ export function initLegacyEngine() {
                 authSubmitBtn.addEventListener('click', async (e) => {
                     e.stopPropagation();
                     await submitAuthForm();
+                });
+            }
+
+            if (authForgotPasswordBtn) {
+                authForgotPasswordBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await requestPasswordReset();
                 });
             }
 

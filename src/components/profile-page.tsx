@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
+import {
+  EmailAuthProvider,
+  onAuthStateChanged,
+  reauthenticateWithCredential,
+  signOut,
+  updatePassword,
+  type User,
+} from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { auth, db, trackAnalyticsEvent } from '../lib/firebase-config';
 
@@ -158,6 +165,73 @@ function mapFirestoreSyncError(error: unknown, fallbackMessage: string): string 
   return fallbackMessage;
 }
 
+function mapPasswordUpdateError(error: unknown): string {
+  const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
+  if (code.includes('invalid-credential') || code.includes('wrong-password')) {
+    return 'Current password is incorrect.';
+  }
+  if (code.includes('weak-password')) {
+    return 'New password is too weak. Use at least 6 characters.';
+  }
+  if (code.includes('too-many-requests')) {
+    return 'Too many attempts. Please wait and try again.';
+  }
+  if (code.includes('network-request-failed')) {
+    return 'Network error while updating password. Check connection and retry.';
+  }
+  if (code.includes('requires-recent-login')) {
+    return 'Session expired for security. Sign in again and retry.';
+  }
+  return 'Unable to update password right now. Please try again.';
+}
+
+function VisibilityToggleButton({
+  shown,
+  onToggle,
+  label,
+}: {
+  shown: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={label}
+      title={label}
+      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-[#3f3320] bg-[#141008] p-1.5 text-[#cfb67b] hover:border-[#8d6a2d] hover:text-[#f0d79c]"
+    >
+      {shown ? (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3 3L21 21" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          <path
+            d="M10.58 10.58a2 2 0 0 0 2.84 2.84"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          />
+          <path
+            d="M9.88 5.09A10.3 10.3 0 0 1 12 4.9c5.37 0 9.3 3.58 10.6 6.95a1 1 0 0 1 0 .7 12.82 12.82 0 0 1-4.23 5.45M6.17 6.18A12.92 12.92 0 0 0 1.4 11.85a1 1 0 0 0 0 .7c1.3 3.36 5.23 6.95 10.6 6.95a10.4 10.4 0 0 0 4.12-.82"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          />
+        </svg>
+      ) : (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M1.4 12.2a1 1 0 0 1 0-.7C2.7 8.13 6.63 4.55 12 4.55s9.3 3.58 10.6 6.95a1 1 0 0 1 0 .7c-1.3 3.36-5.23 6.95-10.6 6.95S2.7 15.56 1.4 12.2Z"
+            stroke="currentColor"
+            strokeWidth="1.8"
+          />
+          <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 export default function ProfilePage() {
   const editedFieldsRef = useRef<Set<ProfileField>>(new Set());
   const initialProfile = useMemo(() => {
@@ -182,13 +256,38 @@ export default function ProfilePage() {
   const [confirmedFields, setConfirmedFields] = useState<ConfirmedFields>(initialConfirmed);
   const [activeField, setActiveField] = useState<ProfileField | null>(null);
   const [busy, setBusy] = useState(false);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [currentPasswordInput, setCurrentPasswordInput] = useState('');
+  const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [passwordStatusMessage, setPasswordStatusMessage] = useState('');
+  const [passwordStatusType, setPasswordStatusType] = useState<'success' | 'error' | ''>('');
   const [isRemoteLoaded, setIsRemoteLoaded] = useState(false);
   const [cloudSyncError, setCloudSyncError] = useState('');
+  const passwordsMatch =
+    newPasswordInput.length > 0 &&
+    confirmPasswordInput.length > 0 &&
+    newPasswordInput === confirmPasswordInput;
+  const passwordsMismatch =
+    confirmPasswordInput.length > 0 &&
+    newPasswordInput !== confirmPasswordInput;
+  const canSubmitPasswordChange =
+    !passwordBusy &&
+    !busy &&
+    currentPasswordInput.length > 0 &&
+    newPasswordInput.length >= 6 &&
+    confirmPasswordInput.length > 0 &&
+    newPasswordInput === confirmPasswordInput;
 
   useEffect(() => {
     let isMounted = true;
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user && !user.isAnonymous) {
+        setAuthUser(user);
         void trackAnalyticsEvent('profile_auth_state', { state: 'authenticated' });
         setStatus('loading');
         setEmail(user.email || 'No email available');
@@ -251,6 +350,15 @@ export default function ProfilePage() {
         };
         void loadRemoteProfile();
       } else {
+        setAuthUser(null);
+        setCurrentPasswordInput('');
+        setNewPasswordInput('');
+        setConfirmPasswordInput('');
+        setShowCurrentPassword(false);
+        setShowNewPassword(false);
+        setShowConfirmPassword(false);
+        setPasswordStatusMessage('');
+        setPasswordStatusType('');
         void trackAnalyticsEvent('profile_auth_state', { state: 'guest' });
         setStatus('guest');
         setIsRemoteLoaded(false);
@@ -367,6 +475,68 @@ export default function ProfilePage() {
       });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handlePasswordChange = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setPasswordStatusMessage('');
+    setPasswordStatusType('');
+
+    if (!authUser || authUser.isAnonymous) {
+      setPasswordStatusMessage('No signed-in account is available for password update.');
+      setPasswordStatusType('error');
+      return;
+    }
+
+    if (!authUser.email) {
+      setPasswordStatusMessage('This account has no email/password sign-in method enabled.');
+      setPasswordStatusType('error');
+      return;
+    }
+
+    if (!currentPasswordInput) {
+      setPasswordStatusMessage('Current password is required.');
+      setPasswordStatusType('error');
+      return;
+    }
+
+    if (newPasswordInput.length < 6) {
+      setPasswordStatusMessage('New password must be at least 6 characters.');
+      setPasswordStatusType('error');
+      return;
+    }
+
+    if (newPasswordInput !== confirmPasswordInput) {
+      setPasswordStatusMessage('New password and confirm password do not match.');
+      setPasswordStatusType('error');
+      return;
+    }
+
+    try {
+      setPasswordBusy(true);
+      setPasswordStatusMessage('Updating password...');
+      setPasswordStatusType('');
+      void trackAnalyticsEvent('profile_password_change_requested');
+
+      const credential = EmailAuthProvider.credential(authUser.email, currentPasswordInput);
+      await reauthenticateWithCredential(authUser, credential);
+      await updatePassword(authUser, newPasswordInput);
+
+      setCurrentPasswordInput('');
+      setNewPasswordInput('');
+      setConfirmPasswordInput('');
+      setPasswordStatusMessage('Password updated successfully.');
+      setPasswordStatusType('success');
+      void trackAnalyticsEvent('profile_password_change_success');
+    } catch (error) {
+      setPasswordStatusMessage(mapPasswordUpdateError(error));
+      setPasswordStatusType('error');
+      void trackAnalyticsEvent('profile_password_change_failed', {
+        error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+      });
+    } finally {
+      setPasswordBusy(false);
     }
   };
 
@@ -649,6 +819,114 @@ export default function ProfilePage() {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div className="rounded-2xl border border-[#3f3320] bg-[#090703] p-5 md:p-6">
+                <h2 className="text-lg font-medium text-[#f2f2f2]">Reset Password</h2>
+                <p className="mt-1 text-sm text-[#b3b3b3]">
+                  Re-authenticate with your current password, then set a new one.
+                </p>
+
+                <form id="profile-change-password-form" className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={handlePasswordChange}>
+                  <div className="md:col-span-2">
+                    <label className="text-xs uppercase tracking-[0.12em] text-[#8f8f8f]" htmlFor="profile-current-password">
+                      Current Password
+                    </label>
+                    <div className="relative mt-1">
+                      <input
+                        id="profile-current-password"
+                        type={showCurrentPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        value={currentPasswordInput}
+                        onChange={(e) => setCurrentPasswordInput(e.target.value)}
+                        className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
+                      />
+                      <VisibilityToggleButton
+                        shown={showCurrentPassword}
+                        onToggle={() => setShowCurrentPassword((prev) => !prev)}
+                        label={showCurrentPassword ? 'Hide current password' : 'Show current password'}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs uppercase tracking-[0.12em] text-[#8f8f8f]" htmlFor="profile-new-password">
+                      New Password
+                    </label>
+                    <div className="relative mt-1">
+                      <input
+                        id="profile-new-password"
+                        type={showNewPassword ? 'text' : 'password'}
+                        autoComplete="new-password"
+                        value={newPasswordInput}
+                        onChange={(e) => setNewPasswordInput(e.target.value)}
+                        className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
+                      />
+                      <VisibilityToggleButton
+                        shown={showNewPassword}
+                        onToggle={() => setShowNewPassword((prev) => !prev)}
+                        label={showNewPassword ? 'Hide new password' : 'Show new password'}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs uppercase tracking-[0.12em] text-[#8f8f8f]" htmlFor="profile-confirm-password">
+                      Confirm New Password
+                    </label>
+                    <div className="relative mt-1">
+                      <input
+                        id="profile-confirm-password"
+                        type={showConfirmPassword ? 'text' : 'password'}
+                        autoComplete="new-password"
+                        value={confirmPasswordInput}
+                        onChange={(e) => setConfirmPasswordInput(e.target.value)}
+                        className={`w-full rounded-lg border bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors ${
+                          passwordsMismatch
+                            ? 'border-[#7a2f2f] focus:border-[#b45050]'
+                            : passwordsMatch
+                              ? 'border-[#5f6f3a] focus:border-[#93ab52]'
+                              : 'border-[#3f3320] focus:border-[#9a7a38]'
+                        }`}
+                      />
+                      <VisibilityToggleButton
+                        shown={showConfirmPassword}
+                        onToggle={() => setShowConfirmPassword((prev) => !prev)}
+                        label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                      />
+                    </div>
+                    {passwordsMismatch && (
+                      <p className="mt-1 text-xs text-[#d99898]">Passwords do not match.</p>
+                    )}
+                    {passwordsMatch && (
+                      <p className="mt-1 text-xs text-[#bdda93]">Passwords match.</p>
+                    )}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={!canSubmitPasswordChange}
+                    className="md:col-span-2 w-full rounded-lg border border-[#7f5f24] bg-[#1b1306] px-4 py-2 text-sm text-[#f0e1c3] hover:bg-[#2a1d09] disabled:opacity-60"
+                  >
+                    {passwordBusy ? 'Updating Password...' : 'Update Password'}
+                  </button>
+                </form>
+
+                {passwordStatusMessage && (
+                  <div
+                    className={`mt-3 rounded-lg border px-3 py-2 text-xs ${
+                      passwordStatusType === 'success'
+                        ? 'border-[#5d4a1e] bg-[#1c1508] text-[#ecd7a2]'
+                        : 'border-[#5f2e2e] bg-[#1a0d0d] text-[#efc7c7]'
+                    }`}
+                  >
+                    {passwordStatusMessage}
+                  </div>
+                )}
+
+                <p className="mt-3 text-xs text-[#8f8f8f]">
+                  Forgot current password? Use <span className="text-[#d1b16f]">Forgot password?</span> in the auth card.
+                </p>
               </div>
             </div>
           </div>

@@ -34,6 +34,8 @@ ui-debug.log*
 
 # Local planning docs
 IMPLEMENTATION_CHECKLIST.md
+PASSWORD_WORKFLOW_CHECKLIST.md
+AUTH_UPGRADE_CHECKLIST.md
 
 # Env files
 .env

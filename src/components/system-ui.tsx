@@ -89,6 +89,7 @@ export default function SystemUI() {
                         <input id="auth-email-input" className="auth-field-input" type="email" autoComplete="email" />
                         <label className="auth-field-label" htmlFor="auth-password-input">Password</label>
                         <input id="auth-password-input" className="auth-field-input" type="password" autoComplete="current-password" />
+                        <button id="auth-forgot-password-btn" className="auth-link-btn" type="button">Forgot password?</button>
                     </div>
                     <div className="auth-card-cta-row">
                         <button id="auth-submit-btn" className="auth-card-btn auth-card-btn-primary" type="button">Sign in</button>

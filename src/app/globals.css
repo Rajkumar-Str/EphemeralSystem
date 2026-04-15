@@ -680,6 +680,30 @@
             box-shadow: 0 0 0 2px rgba(var(--theme-rgb), 0.15);
         }
 
+        .auth-link-btn {
+            appearance: none;
+            border: none;
+            background: transparent;
+            color: #bda878;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.78rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            text-align: right;
+            padding: 0.2rem 0;
+            cursor: pointer;
+            transition: color 0.2s ease, opacity 0.2s ease;
+        }
+
+        .auth-link-btn:hover {
+            color: #e2c98f;
+        }
+
+        .auth-link-btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
         .auth-card-cta-row {
             display: grid;
             grid-template-columns: 1fr 1fr;
