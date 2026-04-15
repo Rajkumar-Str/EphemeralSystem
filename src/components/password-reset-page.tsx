@@ -9,18 +9,23 @@ function VisibilityToggleButton({
   shown,
   onToggle,
   label,
+  visible = true,
 }: {
   shown: boolean;
   onToggle: () => void;
   label: string;
+  visible?: boolean;
 }) {
   return (
     <button
       type="button"
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onToggle}
       aria-label={label}
       title={label}
-      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-[#3f3320] bg-[#141008] p-1.5 text-[#cfb67b] hover:border-[#8d6a2d] hover:text-[#f0d79c]"
+      className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-[#3f3320] bg-[#141008] p-1.5 text-[#cfb67b] transition-opacity hover:border-[#8d6a2d] hover:text-[#f0d79c] ${
+        visible ? 'opacity-100' : 'pointer-events-none opacity-0'
+      }`}
     >
       {shown ? (
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -120,6 +125,8 @@ export default function PasswordResetPage() {
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [newPasswordFocused, setNewPasswordFocused] = useState(false);
+  const [confirmNewPasswordFocused, setConfirmNewPasswordFocused] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Checking action link...');
   const [busy, setBusy] = useState(false);
   const passwordsMatch = newPassword.length > 0 && confirmNewPassword.length > 0 && newPassword === confirmNewPassword;
@@ -275,12 +282,15 @@ export default function PasswordResetPage() {
                   autoComplete="new-password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
+                  onFocus={() => setNewPasswordFocused(true)}
+                  onBlur={() => setNewPasswordFocused(false)}
                   className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38]"
                 />
                 <VisibilityToggleButton
                   shown={showNewPassword}
                   onToggle={() => setShowNewPassword((prev) => !prev)}
                   label={showNewPassword ? 'Hide new password' : 'Show new password'}
+                  visible={newPasswordFocused}
                 />
               </div>
             </div>
@@ -296,6 +306,8 @@ export default function PasswordResetPage() {
                   autoComplete="new-password"
                   value={confirmNewPassword}
                   onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  onFocus={() => setConfirmNewPasswordFocused(true)}
+                  onBlur={() => setConfirmNewPasswordFocused(false)}
                   className={`w-full rounded-lg border bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors ${
                     passwordsMismatch
                       ? 'border-[#7a2f2f] focus:border-[#b45050]'
@@ -308,6 +320,7 @@ export default function PasswordResetPage() {
                   shown={showConfirmPassword}
                   onToggle={() => setShowConfirmPassword((prev) => !prev)}
                   label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                  visible={confirmNewPasswordFocused}
                 />
               </div>
               {passwordsMismatch && (

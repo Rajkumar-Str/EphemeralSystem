@@ -1,15 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   EmailAuthProvider,
+  GoogleAuthProvider,
+  deleteUser,
   onAuthStateChanged,
   reload,
   reauthenticateWithCredential,
+  reauthenticateWithPopup,
   sendEmailVerification,
   signOut,
   updatePassword,
   type User,
 } from 'firebase/auth';
-import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, serverTimestamp, setDoc } from 'firebase/firestore';
 import { auth, db, trackAnalyticsEvent } from '../lib/firebase-config';
 
 type ProfileState = 'loading' | 'ready' | 'guest';
@@ -40,6 +43,7 @@ const PROFILE_DETAILS_KEY = 'ephemeral_profile_details';
 const PROFILE_CONFIRMED_FIELDS_KEY = 'ephemeral_profile_confirmed_fields';
 const PROFILE_ARTIFACT_APP_ID = 'default-app-id';
 const PROFILE_DOC_ID = 'main';
+const ACCOUNT_DELETE_CONFIRM_PHRASE = 'DELETE MY ACCOUNT';
 
 const confirmationRequiredFields: ProfileField[] = [
   'displayName',
@@ -204,25 +208,64 @@ function mapEmailVerificationError(error: unknown): string {
   return 'Unable to send verification email right now. Please try again.';
 }
 
+function mapAccountDeleteReauthError(error: unknown): string {
+  const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
+  if (code.includes('wrong-password') || code.includes('invalid-credential')) {
+    return 'Current password is incorrect.';
+  }
+  if (code.includes('popup-closed-by-user')) {
+    return 'Google re-auth popup was closed before completion.';
+  }
+  if (code.includes('popup-blocked')) {
+    return 'Popup blocked by browser. Allow popups and try again.';
+  }
+  if (code.includes('cancelled-popup-request')) {
+    return 'Google re-auth is already in progress.';
+  }
+  if (code.includes('network-request-failed')) {
+    return 'Network error during re-authentication. Check connection and retry.';
+  }
+  return 'Unable to verify account ownership right now. Try again.';
+}
+
+function mapAccountDeleteError(error: unknown): string {
+  const code = String((error as { code?: string } | null)?.code || '').toLowerCase();
+  if (code.includes('requires-recent-login')) {
+    return 'Re-authentication expired. Verify identity again, then retry account deletion.';
+  }
+  if (code.includes('permission-denied')) {
+    return 'Data cleanup is blocked by Firestore rules. Update rules before deleting account.';
+  }
+  if (code.includes('unavailable') || code.includes('network-request-failed')) {
+    return 'Network or service issue while deleting account. Please retry.';
+  }
+  return 'Unable to delete account right now. Please try again.';
+}
+
 function VisibilityToggleButton({
   shown,
   onToggle,
   label,
   disabled = false,
+  visible = true,
 }: {
   shown: boolean;
   onToggle: () => void;
   label: string;
   disabled?: boolean;
+  visible?: boolean;
 }) {
   return (
     <button
       type="button"
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onToggle}
       disabled={disabled}
       aria-label={label}
       title={label}
-      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-[#3f3320] bg-[#141008] p-1.5 text-[#cfb67b] hover:border-[#8d6a2d] hover:text-[#f0d79c] disabled:cursor-not-allowed disabled:opacity-60"
+      className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-md border border-[#3f3320] bg-[#141008] p-1.5 text-[#cfb67b] transition-opacity hover:border-[#8d6a2d] hover:text-[#f0d79c] disabled:cursor-not-allowed disabled:opacity-60 ${
+        visible ? 'opacity-100' : 'pointer-events-none opacity-0'
+      }`}
     >
       {shown ? (
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -288,12 +331,35 @@ export default function ProfilePage() {
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [currentPasswordFocused, setCurrentPasswordFocused] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
+  const [newPasswordFocused, setNewPasswordFocused] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [confirmPasswordFocused, setConfirmPasswordFocused] = useState(false);
   const [passwordStatusMessage, setPasswordStatusMessage] = useState('');
   const [passwordStatusType, setPasswordStatusType] = useState<'success' | 'error' | ''>('');
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteCurrentPasswordInput, setDeleteCurrentPasswordInput] = useState('');
+  const [showDeleteCurrentPassword, setShowDeleteCurrentPassword] = useState(false);
+  const [deleteCurrentPasswordFocused, setDeleteCurrentPasswordFocused] = useState(false);
+  const [deleteConfirmPhraseInput, setDeleteConfirmPhraseInput] = useState('');
+  const [deleteConfirmChecked, setDeleteConfirmChecked] = useState(false);
+  const [deleteFlowOpen, setDeleteFlowOpen] = useState(false);
+  const [deleteReauthComplete, setDeleteReauthComplete] = useState(false);
+  const [deleteReauthProvider, setDeleteReauthProvider] = useState<'none' | 'password' | 'google'>('none');
+  const [deleteStatusMessage, setDeleteStatusMessage] = useState('');
+  const [deleteStatusType, setDeleteStatusType] = useState<'success' | 'error' | ''>('');
   const [isRemoteLoaded, setIsRemoteLoaded] = useState(false);
   const [cloudSyncError, setCloudSyncError] = useState('');
+  const authProviderIds = (authUser?.providerData || []).map((provider) => provider?.providerId || '');
+  const canDeleteReauthWithPassword = !!authUser?.email && authProviderIds.includes('password');
+  const canDeleteReauthWithGoogle = authProviderIds.includes('google.com');
+  const deletePhraseMatches = deleteConfirmPhraseInput.trim().toUpperCase() === ACCOUNT_DELETE_CONFIRM_PHRASE;
+  const canSubmitDeleteAccount =
+    !deleteBusy &&
+    deleteReauthComplete &&
+    deleteConfirmChecked &&
+    deletePhraseMatches;
   const passwordsMatch =
     newPasswordInput.length > 0 &&
     confirmPasswordInput.length > 0 &&
@@ -304,6 +370,7 @@ export default function ProfilePage() {
   const canSubmitPasswordChange =
     !passwordBusy &&
     !verificationBusy &&
+    !deleteBusy &&
     !busy &&
     isEmailVerified &&
     currentPasswordInput.length > 0 &&
@@ -317,6 +384,20 @@ export default function ProfilePage() {
       if (user && !user.isAnonymous) {
         setAuthUser(user);
         setIsEmailVerified(!!user.emailVerified);
+        setDeleteReauthComplete(false);
+        setDeleteReauthProvider('none');
+        setDeleteCurrentPasswordInput('');
+        setShowDeleteCurrentPassword(false);
+        setDeleteCurrentPasswordFocused(false);
+        setDeleteConfirmPhraseInput('');
+        setDeleteConfirmChecked(false);
+        setDeleteFlowOpen(false);
+        setDeleteBusy(false);
+        setDeleteStatusMessage('');
+        setDeleteStatusType('');
+        setCurrentPasswordFocused(false);
+        setNewPasswordFocused(false);
+        setConfirmPasswordFocused(false);
         void trackAnalyticsEvent('profile_auth_state', { state: 'authenticated' });
         setStatus('loading');
         setEmail(user.email || 'No email available');
@@ -387,8 +468,22 @@ export default function ProfilePage() {
         setShowCurrentPassword(false);
         setShowNewPassword(false);
         setShowConfirmPassword(false);
+        setCurrentPasswordFocused(false);
+        setNewPasswordFocused(false);
+        setConfirmPasswordFocused(false);
         setPasswordStatusMessage('');
         setPasswordStatusType('');
+        setDeleteCurrentPasswordInput('');
+        setShowDeleteCurrentPassword(false);
+        setDeleteCurrentPasswordFocused(false);
+        setDeleteConfirmPhraseInput('');
+        setDeleteConfirmChecked(false);
+        setDeleteFlowOpen(false);
+        setDeleteReauthComplete(false);
+        setDeleteReauthProvider('none');
+        setDeleteBusy(false);
+        setDeleteStatusMessage('');
+        setDeleteStatusType('');
         setVerificationStatusMessage('');
         setVerificationStatusType('');
         void trackAnalyticsEvent('profile_auth_state', { state: 'guest' });
@@ -412,7 +507,7 @@ export default function ProfilePage() {
   }, [details, confirmedFields]);
 
   useEffect(() => {
-    if (status !== 'ready' || !uid || !isRemoteLoaded) return;
+    if (status !== 'ready' || !uid || !isRemoteLoaded || deleteBusy) return;
 
     const timeout = window.setTimeout(() => {
       const syncProfile = async () => {
@@ -449,7 +544,19 @@ export default function ProfilePage() {
     }, 500);
 
     return () => window.clearTimeout(timeout);
-  }, [status, uid, isRemoteLoaded, email, details, confirmedFields]);
+  }, [status, uid, isRemoteLoaded, deleteBusy, email, details, confirmedFields]);
+
+  useEffect(() => {
+    if (!deleteFlowOpen) return;
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !deleteBusy) {
+        setDeleteFlowOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
+  }, [deleteFlowOpen, deleteBusy]);
 
   const completion = useMemo(() => profileCompletion(details, confirmedFields), [details, confirmedFields]);
   const initials = useMemo(() => getInitials(details.displayName, email), [details.displayName, email]);
@@ -489,17 +596,23 @@ export default function ProfilePage() {
     window.location.assign('/');
   };
 
+  const clearProfileStorage = () => {
+    try {
+      localStorage.removeItem(PROFILE_USER_KEY);
+      localStorage.removeItem(PROFILE_DETAILS_KEY);
+      localStorage.removeItem(PROFILE_CONFIRMED_FIELDS_KEY);
+    } catch {
+      // Ignore storage failures silently.
+    }
+  };
+
   const handleSignOut = async () => {
     try {
       setBusy(true);
       void trackAnalyticsEvent('profile_sign_out_requested');
       await signOut(auth);
       void trackAnalyticsEvent('profile_sign_out_success');
-      try {
-        localStorage.removeItem(PROFILE_USER_KEY);
-      } catch {
-        // Ignore storage failures silently.
-      }
+      clearProfileStorage();
       window.location.assign('/');
     } catch (error) {
       void trackAnalyticsEvent('profile_sign_out_failed', {
@@ -508,6 +621,24 @@ export default function ProfilePage() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const cleanupAccountData = async (targetUid: string): Promise<number> => {
+    const chatsRef = collection(db, 'artifacts', PROFILE_ARTIFACT_APP_ID, 'users', targetUid, 'chats');
+    const chatsSnapshot = await getDocs(chatsRef);
+    await Promise.all(chatsSnapshot.docs.map((chatDoc) => deleteDoc(chatDoc.ref)));
+
+    const profileRef = doc(db, 'artifacts', PROFILE_ARTIFACT_APP_ID, 'users', targetUid, 'profile', PROFILE_DOC_ID);
+    await deleteDoc(profileRef);
+
+    const legacyProfileRef = doc(db, 'profiles', targetUid);
+    try {
+      await deleteDoc(legacyProfileRef);
+    } catch {
+      // Ignore legacy cleanup failures; primary account data already removed.
+    }
+
+    return chatsSnapshot.size;
   };
 
   const buildVerificationActionSettings = () => {
@@ -581,6 +712,136 @@ export default function ProfilePage() {
       });
     } finally {
       setVerificationBusy(false);
+    }
+  };
+
+  const handleDeleteReauthWithPassword = async () => {
+    setDeleteStatusMessage('');
+    setDeleteStatusType('');
+
+    if (!authUser || authUser.isAnonymous || !authUser.email) {
+      setDeleteStatusMessage('No email account is available for password re-authentication.');
+      setDeleteStatusType('error');
+      return;
+    }
+
+    if (!deleteCurrentPasswordInput) {
+      setDeleteStatusMessage('Current password is required for account deletion.');
+      setDeleteStatusType('error');
+      return;
+    }
+
+    try {
+      setDeleteBusy(true);
+      void trackAnalyticsEvent('profile_delete_reauth_requested', { provider: 'password' });
+      const credential = EmailAuthProvider.credential(authUser.email, deleteCurrentPasswordInput);
+      await reauthenticateWithCredential(authUser, credential);
+      setDeleteCurrentPasswordInput('');
+      setDeleteReauthComplete(true);
+      setDeleteReauthProvider('password');
+      setDeleteStatusMessage('Re-authenticated with password. You can now delete this account.');
+      setDeleteStatusType('success');
+      void trackAnalyticsEvent('profile_delete_reauth_success', { provider: 'password' });
+    } catch (error) {
+      setDeleteReauthComplete(false);
+      setDeleteReauthProvider('none');
+      setDeleteStatusMessage(mapAccountDeleteReauthError(error));
+      setDeleteStatusType('error');
+      void trackAnalyticsEvent('profile_delete_reauth_failed', {
+        provider: 'password',
+        error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+      });
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const handleDeleteReauthWithGoogle = async () => {
+    setDeleteStatusMessage('');
+    setDeleteStatusType('');
+
+    if (!authUser || authUser.isAnonymous) {
+      setDeleteStatusMessage('No signed-in account available for Google re-authentication.');
+      setDeleteStatusType('error');
+      return;
+    }
+
+    try {
+      setDeleteBusy(true);
+      void trackAnalyticsEvent('profile_delete_reauth_requested', { provider: 'google' });
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await reauthenticateWithPopup(authUser, provider);
+      setDeleteReauthComplete(true);
+      setDeleteReauthProvider('google');
+      setDeleteStatusMessage('Re-authenticated with Google. You can now delete this account.');
+      setDeleteStatusType('success');
+      void trackAnalyticsEvent('profile_delete_reauth_success', { provider: 'google' });
+    } catch (error) {
+      setDeleteReauthComplete(false);
+      setDeleteReauthProvider('none');
+      setDeleteStatusMessage(mapAccountDeleteReauthError(error));
+      setDeleteStatusType('error');
+      void trackAnalyticsEvent('profile_delete_reauth_failed', {
+        provider: 'google',
+        error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+      });
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    setDeleteStatusMessage('');
+    setDeleteStatusType('');
+
+    if (!authUser || authUser.isAnonymous || !authUser.uid) {
+      setDeleteStatusMessage('No signed-in account found for deletion.');
+      setDeleteStatusType('error');
+      return;
+    }
+
+    if (!deleteReauthComplete) {
+      setDeleteStatusMessage('Re-authenticate first before deleting your account.');
+      setDeleteStatusType('error');
+      return;
+    }
+
+    if (!deleteConfirmChecked || !deletePhraseMatches) {
+      setDeleteStatusMessage(`Type "${ACCOUNT_DELETE_CONFIRM_PHRASE}" and confirm irreversible deletion.`);
+      setDeleteStatusType('error');
+      return;
+    }
+
+    try {
+      setDeleteBusy(true);
+      void trackAnalyticsEvent('profile_delete_requested', {
+        reauth_provider: deleteReauthProvider,
+      });
+      const deletedChatsCount = await cleanupAccountData(authUser.uid);
+      await deleteUser(authUser);
+      clearProfileStorage();
+      void trackAnalyticsEvent('profile_delete_success', {
+        reauth_provider: deleteReauthProvider,
+        deleted_chats_count: deletedChatsCount,
+      });
+      window.location.assign('/');
+    } catch (error) {
+      const message = mapAccountDeleteError(error);
+      setDeleteStatusMessage(message);
+      setDeleteStatusType('error');
+
+      if (String((error as { code?: string } | null)?.code || '').toLowerCase().includes('requires-recent-login')) {
+        setDeleteReauthComplete(false);
+        setDeleteReauthProvider('none');
+      }
+
+      void trackAnalyticsEvent('profile_delete_failed', {
+        reauth_provider: deleteReauthProvider,
+        error_code: String((error as { code?: string } | null)?.code || 'unknown'),
+      });
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -780,7 +1041,7 @@ export default function ProfilePage() {
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
                       <button
                         type="button"
-                        disabled={verificationBusy}
+                        disabled={verificationBusy || deleteBusy}
                         onClick={handleResendVerificationEmail}
                         className="rounded-lg border border-[#7f5f24] bg-[#1b1306] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#f0e1c3] hover:bg-[#2a1d09] disabled:opacity-60"
                       >
@@ -788,7 +1049,7 @@ export default function ProfilePage() {
                       </button>
                       <button
                         type="button"
-                        disabled={verificationBusy}
+                        disabled={verificationBusy || deleteBusy}
                         onClick={handleRefreshVerificationStatus}
                         className="rounded-lg border border-[#3f3320] bg-[#141008] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#d9c8a2] hover:border-[#7f5f24] disabled:opacity-60"
                       >
@@ -810,9 +1071,24 @@ export default function ProfilePage() {
                   </div>
                 )}
 
+                <div className="rounded-lg border border-[#5f2e2e] bg-[#160b0b] p-3 space-y-2">
+                  <p className="text-xs uppercase tracking-[0.14em] text-[#d8a5a5]">Danger Zone</p>
+                  <p className="text-xs text-[#e8bdbd]">
+                    Account deletion is permanent. Open the protected flow to continue.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={deleteBusy}
+                    onClick={() => setDeleteFlowOpen(true)}
+                    className="w-full rounded-lg border border-[#7a2f2f] bg-[#2a1111] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#ffdede] hover:bg-[#3b1717] disabled:opacity-60"
+                  >
+                    Manage Delete Account
+                  </button>
+                </div>
+
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || deleteBusy}
                   onClick={handleSignOut}
                   className="w-full rounded-lg border border-[#5f2e2e] bg-[#271010] px-4 py-2 text-sm text-[#f1c3c3] hover:bg-[#3a1515] disabled:opacity-60"
                 >
@@ -1005,15 +1281,18 @@ export default function ProfilePage() {
                         type={showCurrentPassword ? 'text' : 'password'}
                         autoComplete="current-password"
                         value={currentPasswordInput}
-                        disabled={!isEmailVerified || passwordBusy}
+                        disabled={!isEmailVerified || passwordBusy || deleteBusy}
                         onChange={(e) => setCurrentPasswordInput(e.target.value)}
+                        onFocus={() => setCurrentPasswordFocused(true)}
+                        onBlur={() => setCurrentPasswordFocused(false)}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38] disabled:opacity-60"
                       />
                       <VisibilityToggleButton
                         shown={showCurrentPassword}
                         onToggle={() => setShowCurrentPassword((prev) => !prev)}
                         label={showCurrentPassword ? 'Hide current password' : 'Show current password'}
-                        disabled={!isEmailVerified || passwordBusy}
+                        disabled={!isEmailVerified || passwordBusy || deleteBusy}
+                        visible={currentPasswordFocused}
                       />
                     </div>
                   </div>
@@ -1028,15 +1307,18 @@ export default function ProfilePage() {
                         type={showNewPassword ? 'text' : 'password'}
                         autoComplete="new-password"
                         value={newPasswordInput}
-                        disabled={!isEmailVerified || passwordBusy}
+                        disabled={!isEmailVerified || passwordBusy || deleteBusy}
                         onChange={(e) => setNewPasswordInput(e.target.value)}
+                        onFocus={() => setNewPasswordFocused(true)}
+                        onBlur={() => setNewPasswordFocused(false)}
                         className="w-full rounded-lg border border-[#3f3320] bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors focus:border-[#9a7a38] disabled:opacity-60"
                       />
                       <VisibilityToggleButton
                         shown={showNewPassword}
                         onToggle={() => setShowNewPassword((prev) => !prev)}
                         label={showNewPassword ? 'Hide new password' : 'Show new password'}
-                        disabled={!isEmailVerified || passwordBusy}
+                        disabled={!isEmailVerified || passwordBusy || deleteBusy}
+                        visible={newPasswordFocused}
                       />
                     </div>
                   </div>
@@ -1051,8 +1333,10 @@ export default function ProfilePage() {
                         type={showConfirmPassword ? 'text' : 'password'}
                         autoComplete="new-password"
                         value={confirmPasswordInput}
-                        disabled={!isEmailVerified || passwordBusy}
+                        disabled={!isEmailVerified || passwordBusy || deleteBusy}
                         onChange={(e) => setConfirmPasswordInput(e.target.value)}
+                        onFocus={() => setConfirmPasswordFocused(true)}
+                        onBlur={() => setConfirmPasswordFocused(false)}
                         className={`w-full rounded-lg border bg-[#0f0c07] px-3 py-2 pr-12 text-sm text-[#ececec] outline-none transition-colors disabled:opacity-60 ${
                           passwordsMismatch
                             ? 'border-[#7a2f2f] focus:border-[#b45050]'
@@ -1065,7 +1349,8 @@ export default function ProfilePage() {
                         shown={showConfirmPassword}
                         onToggle={() => setShowConfirmPassword((prev) => !prev)}
                         label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
-                        disabled={!isEmailVerified || passwordBusy}
+                        disabled={!isEmailVerified || passwordBusy || deleteBusy}
+                        visible={confirmPasswordFocused}
                       />
                     </div>
                     {passwordsMismatch && (
@@ -1103,6 +1388,152 @@ export default function ProfilePage() {
               </div>
             </div>
           </div>
+
+          {deleteFlowOpen && (
+            <div
+              className="fixed inset-0 z-[1200] flex items-center justify-center bg-[rgba(2,1,1,0.82)] px-4 py-6"
+              onClick={() => {
+                if (!deleteBusy) setDeleteFlowOpen(false);
+              }}
+            >
+              <div
+                className="w-full max-w-xl rounded-2xl border border-[#7a2f2f] bg-[#0f0707] p-5 shadow-[0_0_40px_rgba(122,47,47,0.35)]"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.14em] text-[#d8a5a5]">Danger Zone</p>
+                    <h3 className="mt-1 text-xl font-semibold text-[#ffe3e3]">Delete Account</h3>
+                    <p className="mt-2 text-sm text-[#efc7c7]">
+                      This permanently deletes your account and removes stored profile and chat data.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={deleteBusy}
+                    onClick={() => setDeleteFlowOpen(false)}
+                    className="rounded-md border border-[#5f2e2e] bg-[#1a0d0d] px-2.5 py-1 text-sm text-[#efc7c7] hover:bg-[#2a1111] disabled:opacity-60"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-4">
+                  <div className="rounded-lg border border-[#5f2e2e] bg-[#160b0b] p-3">
+                    <p className="text-[0.7rem] uppercase tracking-[0.1em] text-[#d1a2a2]">Step 1: Re-authenticate</p>
+
+                    {canDeleteReauthWithPassword && (
+                      <div className="mt-3">
+                        <label className="text-[0.68rem] uppercase tracking-[0.1em] text-[#b58f8f]" htmlFor="delete-account-password">
+                          Current Password
+                        </label>
+                        <div className="relative mt-1">
+                          <input
+                            id="delete-account-password"
+                            type={showDeleteCurrentPassword ? 'text' : 'password'}
+                            autoComplete="current-password"
+                            value={deleteCurrentPasswordInput}
+                            disabled={deleteBusy}
+                            onChange={(e) => setDeleteCurrentPasswordInput(e.target.value)}
+                            onFocus={() => setDeleteCurrentPasswordFocused(true)}
+                            onBlur={() => setDeleteCurrentPasswordFocused(false)}
+                            className="w-full rounded-lg border border-[#5f2e2e] bg-[#130909] px-3 py-2 pr-12 text-sm text-[#f0dddd] outline-none transition-colors focus:border-[#c26c6c] disabled:opacity-60"
+                          />
+                          <VisibilityToggleButton
+                            shown={showDeleteCurrentPassword}
+                            onToggle={() => setShowDeleteCurrentPassword((prev) => !prev)}
+                            label={showDeleteCurrentPassword ? 'Hide delete password field' : 'Show delete password field'}
+                            disabled={deleteBusy}
+                            visible={deleteCurrentPasswordFocused}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          disabled={deleteBusy}
+                          onClick={handleDeleteReauthWithPassword}
+                          className="mt-2 w-full rounded-lg border border-[#6b2e2e] bg-[#2a1111] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#f0c9c9] hover:bg-[#3b1717] disabled:opacity-60"
+                        >
+                          {deleteBusy ? 'Verifying...' : 'Verify Password'}
+                        </button>
+                      </div>
+                    )}
+
+                    {canDeleteReauthWithGoogle && (
+                      <button
+                        type="button"
+                        disabled={deleteBusy}
+                        onClick={handleDeleteReauthWithGoogle}
+                        className="mt-3 w-full rounded-lg border border-[#6b2e2e] bg-[#2a1111] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#f0c9c9] hover:bg-[#3b1717] disabled:opacity-60"
+                      >
+                        {deleteBusy ? 'Verifying...' : 'Re-auth With Google'}
+                      </button>
+                    )}
+
+                    {!canDeleteReauthWithPassword && !canDeleteReauthWithGoogle && (
+                      <p className="mt-3 text-xs text-[#efc7c7]">
+                        Re-auth method unavailable. Sign out and sign in again with your account provider.
+                      </p>
+                    )}
+
+                    {deleteReauthComplete && (
+                      <p className="mt-3 text-xs text-[#f1d2a3]">
+                        Re-authenticated via {deleteReauthProvider === 'password' ? 'password' : 'Google'}.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-lg border border-[#5f2e2e] bg-[#160b0b] p-3 space-y-3">
+                    <p className="text-[0.7rem] uppercase tracking-[0.1em] text-[#d1a2a2]">Step 2: Confirm Irreversible Deletion</p>
+                    <div>
+                      <label className="text-[0.68rem] uppercase tracking-[0.1em] text-[#b58f8f]" htmlFor="delete-account-confirm-phrase">
+                        Type: {ACCOUNT_DELETE_CONFIRM_PHRASE}
+                      </label>
+                      <input
+                        id="delete-account-confirm-phrase"
+                        type="text"
+                        value={deleteConfirmPhraseInput}
+                        disabled={deleteBusy}
+                        onChange={(e) => setDeleteConfirmPhraseInput(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-[#5f2e2e] bg-[#130909] px-3 py-2 text-sm text-[#f0dddd] outline-none transition-colors focus:border-[#c26c6c] disabled:opacity-60"
+                      />
+                    </div>
+
+                    <label className="flex items-center gap-2 text-xs text-[#f0c6c6]">
+                      <input
+                        type="checkbox"
+                        checked={deleteConfirmChecked}
+                        disabled={deleteBusy}
+                        onChange={(e) => setDeleteConfirmChecked(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-[#b45050]"
+                      />
+                      I understand this deletion is permanent.
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={!canSubmitDeleteAccount}
+                    onClick={handleDeleteAccount}
+                    className="w-full rounded-lg border border-[#8b2f2f] bg-[#3a1515] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#ffdede] hover:bg-[#4a1b1b] disabled:opacity-50"
+                  >
+                    {deleteBusy ? 'Deleting Account...' : 'Delete Account Permanently'}
+                  </button>
+
+                  {deleteStatusMessage && (
+                    <div
+                      className={`rounded-lg border px-3 py-2 text-xs ${
+                        deleteStatusType === 'success'
+                          ? 'border-[#5d4a1e] bg-[#1c1508] text-[#ecd7a2]'
+                          : 'border-[#7a2f2f] bg-[#200c0c] text-[#f3c7c7]'
+                      }`}
+                    >
+                      {deleteStatusMessage}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           </>
         )}
       </div>
