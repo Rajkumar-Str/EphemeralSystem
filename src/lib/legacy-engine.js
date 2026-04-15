@@ -77,6 +77,11 @@ export function initLegacyEngine() {
             const WEB_SNAPSHOT_TTL_MS = 12 * 60 * 60 * 1000;
             const WEB_SNAPSHOT_MAX_CHARS = 900;
             const WEB_SNAPSHOT_MAX_SOURCES = 3;
+            const AUTH_RESET_COOLDOWN_STORAGE_KEY = 'ephemeral_auth_reset_cooldown_v1';
+            const AUTH_RESET_BASE_COOLDOWN_MS = 30 * 1000;
+            const AUTH_RESET_MAX_COOLDOWN_MS = 5 * 60 * 1000;
+            const AUTH_RESET_BACKOFF_RESET_MS = 15 * 60 * 1000;
+            const AUTH_FORGOT_PASSWORD_BUTTON_DEFAULT_LABEL = 'Forgot password?';
             let webSnapshot = null;
             let lastWebQuery = '';
             let latestResponseMeta = {
@@ -89,6 +94,11 @@ export function initLegacyEngine() {
             let db = null;
             let appId = 'default-app-id';
             let chatsUnsubscribe = null;
+            let authBusy = false;
+            let authResetCooldownUntil = 0;
+            let authResetAttemptCount = 0;
+            let authResetLastAttemptAt = 0;
+            let authResetCooldownInterval = null;
 
             function trackEvent(eventName, params = {}) {
                 try {
@@ -426,6 +436,7 @@ export function initLegacyEngine() {
                 if (authOpenProfileBtn) {
                     authOpenProfileBtn.disabled = !isSignedIn || !isVerified;
                 }
+                updateForgotPasswordButtonState();
             }
 
             function updateAuthCardSelection(intent = 'signin') {
@@ -439,19 +450,20 @@ export function initLegacyEngine() {
             }
 
             function setAuthBusy(isBusy) {
+                authBusy = !!isBusy;
                 const isSignedIn = !!(user && !user.isAnonymous);
                 const isVerified = !!(user && !user.isAnonymous && user.emailVerified);
                 if (authEmailInput) authEmailInput.disabled = isBusy;
                 if (authPasswordInput) authPasswordInput.disabled = isBusy;
                 if (authSubmitBtn) authSubmitBtn.disabled = isBusy;
                 if (authGoogleSignInBtn) authGoogleSignInBtn.disabled = isBusy;
-                if (authForgotPasswordBtn) authForgotPasswordBtn.disabled = isBusy;
                 if (authSignInBtn) authSignInBtn.disabled = isBusy;
                 if (authSignUpBtn) authSignUpBtn.disabled = isBusy;
                 if (authSignOutBtn) authSignOutBtn.disabled = isBusy || !isSignedIn;
                 if (authOpenProfileBtn) authOpenProfileBtn.disabled = isBusy || !isSignedIn || !isVerified;
                 if (authResendVerificationBtn) authResendVerificationBtn.disabled = isBusy || !isSignedIn || isVerified;
                 if (authContinueChatBtn) authContinueChatBtn.disabled = isBusy;
+                updateForgotPasswordButtonState();
             }
 
             function readAuthCredentials() {
@@ -552,6 +564,103 @@ export function initLegacyEngine() {
                 return 'Unable to send reset email right now. Please try again.';
             }
 
+            function readPasswordResetThrottleState() {
+                if (typeof window === 'undefined') return;
+                try {
+                    const raw = localStorage.getItem(AUTH_RESET_COOLDOWN_STORAGE_KEY);
+                    if (!raw) return;
+                    const parsed = JSON.parse(raw);
+                    authResetCooldownUntil = Number(parsed?.cooldownUntil || 0);
+                    authResetAttemptCount = Number(parsed?.attemptCount || 0);
+                    authResetLastAttemptAt = Number(parsed?.lastAttemptAt || 0);
+                } catch (_) {
+                    authResetCooldownUntil = 0;
+                    authResetAttemptCount = 0;
+                    authResetLastAttemptAt = 0;
+                }
+            }
+
+            function persistPasswordResetThrottleState() {
+                if (typeof window === 'undefined') return;
+                try {
+                    localStorage.setItem(AUTH_RESET_COOLDOWN_STORAGE_KEY, JSON.stringify({
+                        cooldownUntil: authResetCooldownUntil,
+                        attemptCount: authResetAttemptCount,
+                        lastAttemptAt: authResetLastAttemptAt
+                    }));
+                } catch (_) {
+                    // Ignore storage write failures.
+                }
+            }
+
+            function getPasswordResetCooldownRemainingMs() {
+                const remaining = authResetCooldownUntil - Date.now();
+                return remaining > 0 ? remaining : 0;
+            }
+
+            function getPasswordResetCooldownSecondsText() {
+                const remainingMs = getPasswordResetCooldownRemainingMs();
+                const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+                return `${remainingSeconds}s`;
+            }
+
+            function updateForgotPasswordButtonState() {
+                if (!authForgotPasswordBtn) return;
+                const remainingMs = getPasswordResetCooldownRemainingMs();
+                const cooldownActive = remainingMs > 0;
+                authForgotPasswordBtn.disabled = authBusy || cooldownActive;
+                authForgotPasswordBtn.textContent = cooldownActive
+                    ? `Forgot password? (${getPasswordResetCooldownSecondsText()})`
+                    : AUTH_FORGOT_PASSWORD_BUTTON_DEFAULT_LABEL;
+            }
+
+            function startPasswordResetCooldownTicker() {
+                if (authResetCooldownInterval) return;
+                authResetCooldownInterval = setInterval(() => {
+                    const remainingMs = getPasswordResetCooldownRemainingMs();
+                    if (remainingMs <= 0 && authResetCooldownUntil !== 0) {
+                        authResetCooldownUntil = 0;
+                        persistPasswordResetThrottleState();
+                    }
+                    updateForgotPasswordButtonState();
+                    if (remainingMs <= 0 && authResetCooldownUntil === 0 && authResetCooldownInterval) {
+                        clearInterval(authResetCooldownInterval);
+                        authResetCooldownInterval = null;
+                    }
+                }, 1000);
+            }
+
+            function schedulePasswordResetCooldown(durationMs) {
+                const cooldownMs = Math.max(AUTH_RESET_BASE_COOLDOWN_MS, Math.min(AUTH_RESET_MAX_COOLDOWN_MS, durationMs));
+                authResetCooldownUntil = Date.now() + cooldownMs;
+                persistPasswordResetThrottleState();
+                updateForgotPasswordButtonState();
+                startPasswordResetCooldownTicker();
+                return cooldownMs;
+            }
+
+            function getNextPasswordResetCooldownMs() {
+                const now = Date.now();
+                if (!authResetLastAttemptAt || (now - authResetLastAttemptAt) > AUTH_RESET_BACKOFF_RESET_MS) {
+                    authResetAttemptCount = 0;
+                }
+                const backoffStep = Math.min(authResetAttemptCount, 4);
+                return AUTH_RESET_BASE_COOLDOWN_MS * (2 ** backoffStep);
+            }
+
+            function shouldUseEnumerationSafeResetMessage(error) {
+                const code = String(error?.code || '').toLowerCase();
+                return !(
+                    code.includes('invalid-email') ||
+                    code.includes('missing-email') ||
+                    code.includes('network-request-failed') ||
+                    code.includes('configuration-not-found') ||
+                    code.includes('operation-not-allowed') ||
+                    code.includes('api-key-not-valid') ||
+                    code.includes('invalid-api-key')
+                );
+            }
+
             function mapEmailVerificationError(error) {
                 const code = error && error.code ? String(error.code).toLowerCase() : '';
                 if (code.includes('too-many-requests')) return 'Too many verification requests. Please wait and retry.';
@@ -640,6 +749,7 @@ export function initLegacyEngine() {
                 }
                 toggleOverlay(authOverlay);
                 updateAuthSessionUI();
+                updateForgotPasswordButtonState();
                 setTimeout(() => {
                     if (!isSignedIn && authEmailInput) authEmailInput.focus();
                 }, 20);
@@ -791,6 +901,23 @@ export function initLegacyEngine() {
                     return;
                 }
 
+                const remainingMs = getPasswordResetCooldownRemainingMs();
+                if (remainingMs > 0) {
+                    setAuthStatus(`Please wait ${getPasswordResetCooldownSecondsText()} before requesting another reset link.`, 'error');
+                    trackEvent('auth_password_reset_blocked', {
+                        reason: 'cooldown_active',
+                        cooldown_remaining_ms: remainingMs
+                    });
+                    updateForgotPasswordButtonState();
+                    return;
+                }
+
+                const nextCooldownMs = getNextPasswordResetCooldownMs();
+                const appliedCooldownMs = schedulePasswordResetCooldown(nextCooldownMs);
+                authResetAttemptCount += 1;
+                authResetLastAttemptAt = Date.now();
+                persistPasswordResetThrottleState();
+
                 try {
                     setAuthBusy(true);
                     setAuthStatus('Sending password reset link...');
@@ -805,14 +932,25 @@ export function initLegacyEngine() {
                     await sendPasswordResetEmail(auth, email, actionCodeSettings);
 
                     setAuthStatus('If an account exists for this email, a reset link has been sent. Check inbox and spam.', 'success');
-                    trackEvent('auth_password_reset_sent');
+                    trackEvent('auth_password_reset_sent', {
+                        cooldown_ms: appliedCooldownMs,
+                        throttle_attempt_count: authResetAttemptCount
+                    });
                 } catch (resetError) {
-                    setAuthStatus(mapPasswordResetError(resetError), 'error');
+                    const safeMessage = 'If an account exists for this email, a reset link has been sent. Check inbox and spam.';
+                    if (shouldUseEnumerationSafeResetMessage(resetError)) {
+                        setAuthStatus(safeMessage, 'success');
+                    } else {
+                        setAuthStatus(mapPasswordResetError(resetError), 'error');
+                    }
                     trackEvent('auth_password_reset_failed', {
-                        error_code: getAuthErrorCode(resetError)
+                        error_code: getAuthErrorCode(resetError),
+                        cooldown_ms: appliedCooldownMs,
+                        throttle_attempt_count: authResetAttemptCount
                     });
                 } finally {
                     setAuthBusy(false);
+                    updateForgotPasswordButtonState();
                 }
             }
 
@@ -944,6 +1082,13 @@ export function initLegacyEngine() {
 
             buildToneMenu();
             buildChatsMenu();
+            readPasswordResetThrottleState();
+            if (getPasswordResetCooldownRemainingMs() > 0) {
+                startPasswordResetCooldownTicker();
+            } else if (authResetCooldownUntil !== 0) {
+                authResetCooldownUntil = 0;
+                persistPasswordResetThrottleState();
+            }
             updateAuthCardSelection('signin');
             updateAuthSessionUI();
             setAuthBusy(false);
