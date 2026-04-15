@@ -745,6 +745,12 @@
             color: #f3e3c5;
         }
 
+        .auth-card-btn-google {
+            border-color: rgba(255,255,255,0.25);
+            background: rgba(255,255,255,0.04);
+            color: #e2e2e2;
+        }
+
         .auth-card-btn-ghost {
             border-color: rgba(255,255,255,0.2);
             color: #bcbcbc;

@@ -93,6 +93,7 @@ export default function SystemUI() {
                     </div>
                     <div className="auth-card-cta-row">
                         <button id="auth-submit-btn" className="auth-card-btn auth-card-btn-primary" type="button">Sign in</button>
+                        <button id="auth-google-signin-btn" className="auth-card-btn auth-card-btn-google" type="button">Google</button>
                     </div>
                 </div>
 

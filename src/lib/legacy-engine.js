@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification, signOut, onAuthStateChanged, reload } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification, signOut, onAuthStateChanged, reload, GoogleAuthProvider, signInWithPopup, getAdditionalUserInfo } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 export function initLegacyEngine() {
@@ -28,6 +28,7 @@ export function initLegacyEngine() {
             const authSignInBtn = document.getElementById('auth-signin-btn');
             const authSignUpBtn = document.getElementById('auth-signup-btn');
             const authSubmitBtn = document.getElementById('auth-submit-btn');
+            const authGoogleSignInBtn = document.getElementById('auth-google-signin-btn');
             const authForgotPasswordBtn = document.getElementById('auth-forgot-password-btn');
             const authSignOutBtn = document.getElementById('auth-signout-btn');
             const authOpenProfileBtn = document.getElementById('auth-open-profile-btn');
@@ -437,6 +438,7 @@ export function initLegacyEngine() {
                 if (authEmailInput) authEmailInput.disabled = isBusy;
                 if (authPasswordInput) authPasswordInput.disabled = isBusy;
                 if (authSubmitBtn) authSubmitBtn.disabled = isBusy;
+                if (authGoogleSignInBtn) authGoogleSignInBtn.disabled = isBusy;
                 if (authForgotPasswordBtn) authForgotPasswordBtn.disabled = isBusy;
                 if (authSignInBtn) authSignInBtn.disabled = isBusy;
                 if (authSignUpBtn) authSignUpBtn.disabled = isBusy;
@@ -468,6 +470,18 @@ export function initLegacyEngine() {
                 return 'Authentication failed. Check credentials and try again.';
             }
 
+            function mapGoogleAuthError(error) {
+                const code = error && error.code ? String(error.code).toLowerCase() : '';
+                if (code.includes('popup-closed-by-user')) return 'Google sign-in popup was closed before completion.';
+                if (code.includes('cancelled-popup-request')) return 'Google sign-in is already in progress.';
+                if (code.includes('popup-blocked')) return 'Popup blocked by browser. Allow popups and try again.';
+                if (code.includes('unauthorized-domain')) return 'Current domain is not authorized for Google sign-in in Firebase Auth settings.';
+                if (code.includes('operation-not-allowed')) return 'Enable Google sign-in provider in Firebase Auth settings.';
+                if (code.includes('account-exists-with-different-credential')) return 'Account already exists with different sign-in method. Sign in with that method first.';
+                if (code.includes('network-request-failed')) return 'Network error during Google sign-in. Check connection and retry.';
+                return mapAuthError(error);
+            }
+
             function mapPasswordResetError(error) {
                 const code = error && error.code ? String(error.code).toLowerCase() : '';
                 if (code.includes('invalid-email')) return 'Enter a valid email address.';
@@ -496,6 +510,33 @@ export function initLegacyEngine() {
                 return verificationUrl
                     ? { url: verificationUrl, handleCodeInApp: false }
                     : undefined;
+            }
+
+            async function initializeProfileForGoogleSignIn(signedInUser, isNewUser) {
+                if (!db || !signedInUser || !signedInUser.uid) return;
+                try {
+                    const profileRef = doc(db, 'artifacts', appId, 'users', signedInUser.uid, 'profile', 'main');
+                    const now = Date.now();
+                    const profilePayload = {
+                        email: signedInUser.email || '',
+                        authProvider: 'google',
+                        lastLoginAt: now,
+                        updatedAt: now
+                    };
+                    if (isNewUser) {
+                        profilePayload.accountCreatedVia = 'google';
+                        profilePayload.createdAt = now;
+                    }
+                    await setDoc(profileRef, profilePayload, { merge: true });
+                    if (isNewUser) {
+                        trackEvent('auth_google_profile_initialized');
+                    }
+                } catch (profileInitError) {
+                    console.warn('Google sign-in profile bootstrap failed:', profileInitError);
+                    trackEvent('auth_google_profile_init_failed', {
+                        error_code: getAuthErrorCode(profileInitError)
+                    });
+                }
             }
 
             function redirectToProfile(signedInUser) {
@@ -623,6 +664,45 @@ export function initLegacyEngine() {
                     trackEvent('auth_submit_failed', {
                         auth_intent: pendingAuthIntent === 'signup' ? 'signup' : 'signin',
                         error_code: getAuthErrorCode(authError)
+                    });
+                } finally {
+                    setAuthBusy(false);
+                }
+            }
+
+            async function submitGoogleSignIn() {
+                if (!auth) {
+                    setAuthStatus('Firebase auth is not initialized.', 'error');
+                    trackEvent('auth_google_login_failure', { reason: 'auth_unavailable' });
+                    return;
+                }
+
+                try {
+                    setAuthBusy(true);
+                    setAuthStatus('Opening Google sign-in...');
+                    trackEvent('auth_google_login_start');
+
+                    const googleProvider = new GoogleAuthProvider();
+                    googleProvider.setCustomParameters({ prompt: 'select_account' });
+                    const credential = await signInWithPopup(auth, googleProvider);
+                    const signedInUser = credential?.user || null;
+                    const isNewUser = !!getAdditionalUserInfo(credential)?.isNewUser;
+
+                    if (signedInUser && !signedInUser.isAnonymous) {
+                        await initializeProfileForGoogleSignIn(signedInUser, isNewUser);
+                        setAuthStatus('Signed in with Google.', 'success');
+                        updateAuthSessionUI();
+                        trackEvent('auth_google_login_success', { is_new_user: isNewUser });
+                        redirectToProfile(signedInUser);
+                        return;
+                    }
+
+                    setAuthStatus('Google sign-in succeeded, but no account session was returned.', 'error');
+                    trackEvent('auth_google_login_failure', { reason: 'missing_user' });
+                } catch (googleAuthError) {
+                    setAuthStatus(mapGoogleAuthError(googleAuthError), 'error');
+                    trackEvent('auth_google_login_failure', {
+                        error_code: getAuthErrorCode(googleAuthError)
                     });
                 } finally {
                     setAuthBusy(false);
@@ -916,6 +996,13 @@ export function initLegacyEngine() {
                 authSubmitBtn.addEventListener('click', async (e) => {
                     e.stopPropagation();
                     await submitAuthForm();
+                });
+            }
+
+            if (authGoogleSignInBtn) {
+                authGoogleSignInBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    await submitGoogleSignIn();
                 });
             }
 
