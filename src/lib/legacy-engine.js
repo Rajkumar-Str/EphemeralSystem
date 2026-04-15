@@ -729,7 +729,7 @@ export function initLegacyEngine() {
                     trackEvent('auth_password_reset_requested');
 
                     const resetUrl = typeof window !== 'undefined'
-                        ? `${window.location.origin}/reset-password`
+                        ? `${window.location.origin}/auth-action`
                         : null;
                     const actionCodeSettings = resetUrl
                         ? { url: resetUrl, handleCodeInApp: false }

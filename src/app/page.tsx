@@ -45,7 +45,7 @@ export default function Page() {
   });
 
   const isProfileRoute = pathname === '/profile';
-  const isResetPasswordRoute = pathname === '/reset-password';
+  const isAuthActionRoute = pathname === '/auth-action';
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -101,9 +101,9 @@ export default function Page() {
     // Track route changes for SPA navigation visibility in Analytics.
     void trackAnalyticsEvent('route_change', {
       route_path: pathname,
-      route_type: isProfileRoute ? 'profile' : isResetPasswordRoute ? 'reset_password' : 'chat',
+      route_type: isProfileRoute ? 'profile' : isAuthActionRoute ? 'auth_action' : 'chat',
     });
-  }, [pathname, isProfileRoute, isResetPasswordRoute]);
+  }, [pathname, isProfileRoute, isAuthActionRoute]);
 
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -136,18 +136,18 @@ export default function Page() {
   }, [pathname]);
 
   useEffect(() => {
-    if (isProfileRoute || isResetPasswordRoute) return;
+    if (isProfileRoute || isAuthActionRoute) return;
     if (!initialized.current) {
       initialized.current = true;
       initLegacyEngine();
     }
-  }, [isProfileRoute, isResetPasswordRoute]);
+  }, [isProfileRoute, isAuthActionRoute]);
 
   if (isProfileRoute) {
     return <ProfilePage />;
   }
 
-  if (isResetPasswordRoute) {
+  if (isAuthActionRoute) {
     return <PasswordResetPage />;
   }
 
