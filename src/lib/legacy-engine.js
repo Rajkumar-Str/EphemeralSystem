@@ -52,14 +52,15 @@ export function initLegacyEngine() {
             const apiKey = env.VITE_GEMINI_API_KEY || "API_KEY_PLACEHOLDER";
             const DEFAULT_MODEL_API_VERSION = "v1beta";
             const GENERAL_CHAT_MODELS = [
-                { id: "models/gemma-4-31b-it", apiVersion: "v1beta" },
-                { id: "models/gemma-3-27b-it", apiVersion: "v1beta" },
-                { id: "models/gemma-3-12b-it", apiVersion: "v1beta" }
+                { id: "models/gemini-3.1-flash-lite-preview", apiVersion: "v1beta" },
+                { id: "models/gemini-3-flash-preview", apiVersion: "v1beta" }
+                // { id: "models/gemma-4-31b-it", apiVersion: "v1beta" },
+                // { id: "models/gemma-3-27b-it", apiVersion: "v1beta" },
+                // { id: "models/gemma-3-12b-it", apiVersion: "v1beta" }
             ];
             const WEB_GROUNDED_MODELS = [
-                { id: "models/gemini-2.5-flash", apiVersion: "v1beta" },
-                { id: "models/gemini-3.1-flash-lite-preview", apiVersion: "v1beta" },
-                { id: "models/gemini-2.5-flash-lite", apiVersion: "v1beta" }
+                { id: "models/gemini-2.5-flash-lite", apiVersion: "v1beta" },
+                { id: "models/gemini-2.5-flash", apiVersion: "v1beta" }
             ];
             const ENABLE_MAP_GROUNDING = false;
             const fallbackFirebaseConfig = {
