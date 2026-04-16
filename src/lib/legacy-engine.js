@@ -50,8 +50,17 @@ export function initLegacyEngine() {
             
             const env = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env : {};
             const apiKey = env.VITE_GEMINI_API_KEY || "API_KEY_PLACEHOLDER";
-            const NORMAL_CHAT_MODEL = "gemini-3.1-flash-lite-preview";
-            const WEB_GROUNDED_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+            const DEFAULT_MODEL_API_VERSION = "v1beta";
+            const GENERAL_CHAT_MODELS = [
+                { id: "models/gemma-4-31b-it", apiVersion: "v1beta" },
+                { id: "models/gemma-3-27b-it", apiVersion: "v1beta" },
+                { id: "models/gemma-3-12b-it", apiVersion: "v1beta" }
+            ];
+            const WEB_GROUNDED_MODELS = [
+                { id: "models/gemini-2.5-flash", apiVersion: "v1beta" },
+                { id: "models/gemini-3.1-flash-lite-preview", apiVersion: "v1beta" },
+                { id: "models/gemini-2.5-flash-lite", apiVersion: "v1beta" }
+            ];
             const ENABLE_MAP_GROUNDING = false;
             const fallbackFirebaseConfig = {
                 apiKey: env.VITE_FIREBASE_API_KEY || "API_KEY_PLACEHOLDER",
@@ -120,6 +129,28 @@ export function initLegacyEngine() {
                 return String(error?.code || error?.name || 'unknown')
                     .toLowerCase()
                     .replace(/[^a-z0-9_./-]/g, '_');
+            }
+
+            function normalizeModelConfig(modelValue) {
+                const ensureModelPath = (value) => {
+                    const normalized = String(value || '').trim().replace(/^\/+/, '').replace(/^models\//i, '');
+                    return normalized ? `models/${normalized}` : '';
+                };
+                if (typeof modelValue === 'string') {
+                    return {
+                        id: ensureModelPath(modelValue),
+                        apiVersion: DEFAULT_MODEL_API_VERSION
+                    };
+                }
+                return {
+                    id: ensureModelPath(modelValue?.id),
+                    apiVersion: String(modelValue?.apiVersion || DEFAULT_MODEL_API_VERSION).trim() || DEFAULT_MODEL_API_VERSION
+                };
+            }
+
+            function buildModelGenerateContentUrl(modelConfig) {
+                const config = normalizeModelConfig(modelConfig);
+                return `https://generativelanguage.googleapis.com/${config.apiVersion}/${config.id}:generateContent?key=${apiKey}`;
             }
 
             // --- Persistent Storage (Firebase Initialization) ---
@@ -1031,6 +1062,71 @@ export function initLegacyEngine() {
                 return text;
             }
 
+            function buildSafeConversationalFallback(query) {
+                const normalized = String(query || '').trim().toLowerCase();
+                if (/^(hi|hey|hello|yo|sup|what'?s up)[!.?]*$/.test(normalized)) {
+                    return "Hey! How's it going?";
+                }
+                if (/(^|\b)(who are you|what are you|introduce yourself)(\b|$)/.test(normalized)) {
+                    return "I'm your chat buddy here. Ask me anything and I'll keep it clear and short.";
+                }
+                if (normalized.length <= 30) {
+                    return "I'm here. Tell me what you need and I'll keep it short.";
+                }
+                return "Absolutely. Here's the short answer:";
+            }
+
+            function countPromptLeakSignals(text) {
+                const source = String(text || '');
+                if (!source) return 0;
+                const matches = source.match(/(?:user input\s*:|goal\s*:|constraints?\s*:|option\s*\d+\s*:|current date\/time\s*:|no markdown|no ai mention|no role tags|short\?\s*yes|casual\?\s*yes)/gi);
+                return matches ? matches.length : 0;
+            }
+
+            function isLikelyPromptLeak(text) {
+                const source = String(text || '').trim();
+                if (!source) return false;
+                const signalCount = countPromptLeakSignals(source);
+                if (signalCount >= 2) return true;
+                if (signalCount >= 1 && /(^|\n)\s*[*-]\s*(user input|goal|constraints?|option\s*\d+)/i.test(source)) return true;
+                if (signalCount >= 1 && source.length < 500) return true;
+                return false;
+            }
+
+            function sanitizeModelText(rawText, query) {
+                const original = String(rawText || '').replace(/\r\n/g, '\n').trim();
+                if (!original) return '';
+
+                const lines = original.split('\n').map((line) => line.trim()).filter(Boolean);
+                const metaLinePattern = /(?:^|\b)(user input|goal\s*:|constraints?\s*:|option\s*\d+\s*:|current date\/time|no markdown|no ai mention|no role tags|short\?\s*yes|casual\?\s*yes)(?:\b|$)/i;
+                const fencedBlockPattern = /^```/;
+
+                let metaLineCount = 0;
+                const cleanedLines = [];
+                for (const line of lines) {
+                    const noBullet = line.replace(/^[-*•]+\s*/, '');
+                    if (metaLinePattern.test(noBullet) || fencedBlockPattern.test(noBullet)) {
+                        metaLineCount += 1;
+                        continue;
+                    }
+                    cleanedLines.push(noBullet);
+                }
+
+                const cleaned = cleanedLines.join('\n').trim();
+                const heavilyLeaked =
+                    isLikelyPromptLeak(original) ||
+                    metaLineCount >= 3 ||
+                    (metaLineCount >= 2 && (cleaned.length < 20 || cleaned.length < (original.length * 0.2))) ||
+                    (metaLineCount >= 1 && !cleaned);
+
+                if (heavilyLeaked) {
+                    return buildSafeConversationalFallback(query);
+                }
+
+                if (cleaned) return cleaned;
+                return original;
+            }
+
             function buildToneMenu() {
                 toneList.innerHTML = '';
                 for (const [id, data] of Object.entries(personas)) {
@@ -1781,7 +1877,6 @@ export function initLegacyEngine() {
             async function callGeminiAPI(query, options = {}) {
                 const useWebGrounding = !!options.useWebGrounding;
                 const shouldUpdateWebSnapshot = !!options.shouldUpdateWebSnapshot;
-                const candidateModels = useWebGrounding ? WEB_GROUNDED_MODELS : [NORMAL_CHAT_MODEL];
                 const activeSnapshotForThisTurn = !useWebGrounding ? getActiveWebSnapshot() : null;
                 latestResponseMeta = {
                     usedCachedSnapshot: !!activeSnapshotForThisTurn,
@@ -1793,6 +1888,11 @@ export function initLegacyEngine() {
                     used_cached_snapshot: !!activeSnapshotForThisTurn
                 });
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
+                conversationHistory = conversationHistory.filter((entry) => {
+                    if (entry?.role !== 'model') return true;
+                    const text = String(entry?.parts?.[0]?.text || '').trim();
+                    return !isLikelyPromptLeak(text);
+                });
                 
                 // CRITICAL FIX: Grab the live local date and time from the browser
                 const currentDate = new Date().toLocaleString('en-US', { 
@@ -1809,120 +1909,231 @@ export function initLegacyEngine() {
                     contents: conversationHistory,
                     systemInstruction: { parts: [{ text: aiInstruction }] }
                 };
-                if (useWebGrounding) {
-                    // Keep map grounding explicitly disabled for now.
-                    payload.tools = [{ google_search: {} }];
-                    if (ENABLE_MAP_GROUNDING) {
-                        payload.tools.push({ google_maps: {} });
-                    }
-                }
+                async function tryModelList(modelEntries, requestUsesWebGrounding) {
+                    let lastStatusCode = 0;
+                    let lastFailureMessage = '';
+                    const attemptedModelIds = [];
+                    const failedModelReasons = [];
+                    let allFailuresAre403 = modelEntries.length > 0;
 
-                let lastStatusCode = 0;
-                let lastFailureMessage = '';
-                const retryBackoffMs = [1000, 2000, 4000];
-                
-                for (const modelId of candidateModels) {
-                    let retries = 0;
-                    while (retries <= retryBackoffMs.length) {
-                        try {
-                            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(payload)
+                    for (const modelEntry of modelEntries) {
+                        const modelConfig = normalizeModelConfig(modelEntry);
+                        const modelId = modelConfig.id;
+                        attemptedModelIds.push(modelId);
+                        let did429Retry = false;
+
+                        while (true) {
+                            trackEvent('chat_model_attempt_started', {
+                                uses_web_grounding: requestUsesWebGrounding,
+                                model_id: modelId,
+                                api_version: modelConfig.apiVersion,
+                                retry_index: did429Retry ? 1 : 0
                             });
-                            if (!res.ok) {
-                                lastStatusCode = res.status;
-                                lastFailureMessage = `${modelId} -> HTTP ${res.status}`;
-                                if (res.status === 429 || res.status === 404 || res.status === 400 || res.status === 401 || res.status === 403) {
+
+                            try {
+                                const attemptPayload = {
+                                    ...payload
+                                };
+                                if (requestUsesWebGrounding) {
+                                    attemptPayload.tools = [{ google_search: {} }];
+                                    if (ENABLE_MAP_GROUNDING) {
+                                        attemptPayload.tools.push({ google_maps: {} });
+                                    }
+                                }
+
+                                const res = await fetch(buildModelGenerateContentUrl(modelConfig), {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(attemptPayload)
+                                });
+
+                                if (!res.ok) {
+                                    lastStatusCode = res.status;
+                                    lastFailureMessage = `${modelId} -> HTTP ${res.status}`;
+                                    failedModelReasons.push(`${modelId}: HTTP ${res.status}`);
+                                    trackEvent('chat_model_attempt_failed', {
+                                        uses_web_grounding: requestUsesWebGrounding,
+                                        model_id: modelId,
+                                        api_version: modelConfig.apiVersion,
+                                        status_code: res.status
+                                    });
+
+                                    if (res.status !== 403) {
+                                        allFailuresAre403 = false;
+                                    }
+
+                                    if (res.status === 403) {
+                                        break;
+                                    }
+                                    if (res.status === 429) {
+                                        if (!did429Retry) {
+                                            did429Retry = true;
+                                            await new Promise(resolve => setTimeout(resolve, 1500));
+                                            continue;
+                                        }
+                                        break;
+                                    }
+                                    if (res.status === 500 || res.status === 503) {
+                                        break;
+                                    }
                                     break;
                                 }
-                                if ([408, 500, 502, 503, 504].includes(res.status) && retries < retryBackoffMs.length) {
-                                    await new Promise(r => setTimeout(r, retryBackoffMs[retries++]));
-                                    continue;
+
+                                const result = await res.json();
+                                const topCandidate = result.candidates?.[0] || {};
+                                const textParts = topCandidate?.content?.parts?.map(part => part?.text || '').filter(Boolean) || [];
+                                const aiText = sanitizeModelText((textParts.join('') || '').trim(), query);
+
+                                if (!aiText) {
+                                    allFailuresAre403 = false;
+                                    lastFailureMessage = `${modelId} -> empty_response`;
+                                    failedModelReasons.push(`${modelId}: empty response`);
+                                    trackEvent('chat_model_empty_response', {
+                                        uses_web_grounding: requestUsesWebGrounding,
+                                        model_id: modelId
+                                    });
+                                    break;
                                 }
+
+                                console.log(`Gemini request success model: ${modelId}`);
+                                return {
+                                    success: true,
+                                    modelId,
+                                    text: aiText,
+                                    topCandidate
+                                };
+                            } catch (error) {
+                                allFailuresAre403 = false;
+                                const message = error instanceof Error ? error.message : String(error);
+                                lastFailureMessage = `${modelId} -> ${message}`;
+                                failedModelReasons.push(`${modelId}: ${message}`);
+                                trackEvent('chat_model_attempt_failed', {
+                                    uses_web_grounding: requestUsesWebGrounding,
+                                    model_id: modelId,
+                                    api_version: modelConfig.apiVersion,
+                                    error_message: message
+                                });
                                 break;
                             }
-                            const result = await res.json();
-                            const topCandidate = result.candidates?.[0] || {};
-                            const textParts = topCandidate?.content?.parts?.map(part => part?.text || '').filter(Boolean) || [];
-                            const aiText = (textParts.join('') || '').trim();
-                            if (!aiText) {
-                                const emptyText = useWebGrounding
-                                    ? "Grounded web request returned no readable text. Try /refreshweb or ask a narrower question."
-                                    : "The model returned an empty answer. Please try again.";
-                                conversationHistory.push({ role: "model", parts: [{ text: emptyText }] });
-                                trackEvent('chat_model_empty_response', {
-                                    uses_web_grounding: useWebGrounding,
-                                    model_id: modelId
-                                });
-                                return emptyText;
-                            }
-                            conversationHistory.push({ role: "model", parts: [{ text: aiText }] });
-                            trackEvent('chat_model_success', {
-                                uses_web_grounding: useWebGrounding,
-                                model_id: modelId
-                            });
-                            if (useWebGrounding && shouldUpdateWebSnapshot) {
-                                updateWebSnapshot(query, aiText, topCandidate?.groundingMetadata);
-                                latestResponseMeta.groundedSources = extractGroundedSources(topCandidate?.groundingMetadata);
-                                trackEvent('web_snapshot_updated', {
-                                    source_count: latestResponseMeta.groundedSources.length
-                                });
-                            }
-                            
-                            // Fire off the background save to Archives
-                            if (window.saveToArchive) {
-                                window.saveToArchive().catch(e => {
-                                    trackEvent('chat_archive_save_failed');
-                                    console.error(e);
-                                });
-                            }
-                            
-                            return aiText;
-                        } catch (e) {
-                            const message = e instanceof Error ? e.message : String(e);
-                            lastFailureMessage = `${modelId} -> ${message}`;
-                            const isNetworkError = /Failed to fetch|NetworkError|Load failed|fetch/i.test(message);
-                            if (isNetworkError && retries < retryBackoffMs.length) {
-                                await new Promise(r => setTimeout(r, retryBackoffMs[retries++]));
-                                continue;
-                            }
-                            break;
                         }
                     }
-                }
-                
-                if (useWebGrounding) {
-                    const webFallbackText = lastStatusCode === 429
-                        ? "Live web lookup hit Gemini 2.5 free-tier limits right now. Wait for quota reset, or continue with normal chat."
-                        : lastStatusCode === 503
-                            ? "Live web lookup is temporarily overloaded right now. Try /refreshweb again in a minute."
-                            : lastStatusCode === 404
-                                ? "Current grounded model is unavailable for this key/project. Switch to another supported grounded model."
-                                : "Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.";
-                    conversationHistory.push({ role: "model", parts: [{ text: webFallbackText }] });
-                    trackEvent('chat_model_failed', {
-                        uses_web_grounding: true,
-                        status_code: lastStatusCode || 0
-                    });
-                    if (lastFailureMessage) console.error("Grounded request failed:", lastFailureMessage);
-                    return webFallbackText;
+
+                    return {
+                        success: false,
+                        lastStatusCode,
+                        lastFailureMessage,
+                        attemptedModelIds,
+                        failedModelReasons,
+                        allFailuresAre403
+                    };
                 }
 
-                const chatFallbackText = lastStatusCode === 429
-                    ? "Chat model quota is exhausted right now. Wait for reset, then try again."
-                    : lastStatusCode === 503
-                        ? "Chat model is temporarily overloaded. Please try again in a minute."
-                        : lastStatusCode === 404
-                            ? "Configured chat model is unavailable for this key/project."
-                            : "The AI model is temporarily unavailable right now. Please try again in a moment.";
-                conversationHistory.push({ role: "model", parts: [{ text: chatFallbackText }] });
+                const webAttempt = useWebGrounding
+                    ? await tryModelList(WEB_GROUNDED_MODELS, true)
+                    : null;
+
+                if (webAttempt?.success) {
+                    conversationHistory.push({ role: "model", parts: [{ text: webAttempt.text }] });
+                    trackEvent('chat_model_success', {
+                        uses_web_grounding: true,
+                        model_id: webAttempt.modelId,
+                        api_version: DEFAULT_MODEL_API_VERSION
+                    });
+                    if (shouldUpdateWebSnapshot) {
+                        updateWebSnapshot(query, webAttempt.text, webAttempt.topCandidate?.groundingMetadata);
+                        latestResponseMeta.groundedSources = extractGroundedSources(webAttempt.topCandidate?.groundingMetadata);
+                        trackEvent('web_snapshot_updated', {
+                            source_count: latestResponseMeta.groundedSources.length
+                        });
+                    }
+                    if (window.saveToArchive) {
+                        window.saveToArchive().catch(e => {
+                            trackEvent('chat_archive_save_failed');
+                            console.error(e);
+                        });
+                    }
+                    return webAttempt.text;
+                }
+
+                if (useWebGrounding && webAttempt?.allFailuresAre403) {
+                    const generalAttempt = await tryModelList(GENERAL_CHAT_MODELS, false);
+                    if (generalAttempt.success) {
+                        const prefixedResponse = `Search is currently restricted on this key; responding with general knowledge.\n\n${generalAttempt.text}`;
+                        conversationHistory.push({ role: "model", parts: [{ text: prefixedResponse }] });
+                        trackEvent('chat_model_success', {
+                            uses_web_grounding: false,
+                            model_id: generalAttempt.modelId,
+                            api_version: DEFAULT_MODEL_API_VERSION,
+                            source: 'web_fallback_to_general'
+                        });
+                        if (window.saveToArchive) {
+                            window.saveToArchive().catch(e => {
+                                trackEvent('chat_archive_save_failed');
+                                console.error(e);
+                            });
+                        }
+                        return prefixedResponse;
+                    }
+                    const combinedReasons = [
+                        ...(webAttempt?.failedModelReasons || []),
+                        ...(generalAttempt.failedModelReasons || [])
+                    ];
+                    const fallbackText = `The AI model is temporarily unavailable right now. Please try again in a moment. Failed attempts: ${combinedReasons.slice(0, 3).join(' | ')}`;
+                    conversationHistory.push({ role: "model", parts: [{ text: fallbackText }] });
+                    trackEvent('chat_model_failed', {
+                        uses_web_grounding: false,
+                        status_code: generalAttempt.lastStatusCode || webAttempt?.lastStatusCode || 0,
+                        attempted_models: [...(webAttempt?.attemptedModelIds || []), ...generalAttempt.attemptedModelIds].join(','),
+                        failed_model_reasons: combinedReasons.join(' | '),
+                        source: 'web_fallback_to_general'
+                    });
+                    if (generalAttempt.lastFailureMessage || webAttempt?.lastFailureMessage) {
+                        console.error("Chat request failed:", generalAttempt.lastFailureMessage || webAttempt?.lastFailureMessage);
+                    }
+                    return fallbackText;
+                }
+
+                const failedModels = useWebGrounding ? (webAttempt?.failedModelReasons || []) : [];
+                const attemptedModels = useWebGrounding ? (webAttempt?.attemptedModelIds || []) : [];
+                const fallbackAttempt = useWebGrounding ? null : await tryModelList(GENERAL_CHAT_MODELS, false);
+
+                if (!useWebGrounding && fallbackAttempt?.success) {
+                    conversationHistory.push({ role: "model", parts: [{ text: fallbackAttempt.text }] });
+                    trackEvent('chat_model_success', {
+                        uses_web_grounding: false,
+                        model_id: fallbackAttempt.modelId,
+                        api_version: DEFAULT_MODEL_API_VERSION
+                    });
+                    if (window.saveToArchive) {
+                        window.saveToArchive().catch(e => {
+                            trackEvent('chat_archive_save_failed');
+                            console.error(e);
+                        });
+                    }
+                    return fallbackAttempt.text;
+                }
+
+                const finalFailedModels = useWebGrounding ? failedModels : (fallbackAttempt?.failedModelReasons || []);
+                const finalAttemptedModels = useWebGrounding ? attemptedModels : (fallbackAttempt?.attemptedModelIds || []);
+                const finalStatusCode = useWebGrounding ? (webAttempt?.lastStatusCode || 0) : (fallbackAttempt?.lastStatusCode || 0);
+                const finalFailureMessage = useWebGrounding ? webAttempt?.lastFailureMessage : fallbackAttempt?.lastFailureMessage;
+                const shortFailureSummary = finalFailedModels.slice(0, 3).join(' | ');
+
+                const finalFallbackText = useWebGrounding
+                    ? `Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.${shortFailureSummary ? ` Failed attempts: ${shortFailureSummary}` : ''}`
+                    : `The AI model is temporarily unavailable right now. Please try again in a moment.${shortFailureSummary ? ` Failed attempts: ${shortFailureSummary}` : ''}`;
+
+                conversationHistory.push({ role: "model", parts: [{ text: finalFallbackText }] });
                 trackEvent('chat_model_failed', {
-                    uses_web_grounding: false,
-                    status_code: lastStatusCode || 0
+                    uses_web_grounding: useWebGrounding,
+                    status_code: finalStatusCode,
+                    attempted_models: finalAttemptedModels.join(','),
+                    failed_model_reasons: finalFailedModels.join(' | ')
                 });
-                if (lastFailureMessage) console.error("Chat request failed:", lastFailureMessage);
-                return chatFallbackText;
+                if (finalFailureMessage) {
+                    console.error(useWebGrounding ? "Grounded request failed:" : "Chat request failed:", finalFailureMessage);
+                }
+                return finalFallbackText;
             }
 
             async function displayResponse(text, isFastRecall = false) {
