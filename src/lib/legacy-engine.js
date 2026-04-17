@@ -92,6 +92,10 @@ export function initLegacyEngine() {
             const AUTH_RESET_MAX_COOLDOWN_MS = 5 * 60 * 1000;
             const AUTH_RESET_BACKOFF_RESET_MS = 15 * 60 * 1000;
             const AUTH_FORGOT_PASSWORD_BUTTON_DEFAULT_LABEL = 'Forgot password?';
+            const CHAT_REQUEST_TIMEOUT_MS = 18000;
+            const CHAT_RETRY_DELAY_MS = 1200;
+            const CHAT_MAX_TIMEOUT_RETRIES = 1;
+            const CHAT_MAX_TRANSIENT_HTTP_RETRIES = 1;
             let webSnapshot = null;
             let lastWebQuery = '';
             let latestResponseMeta = {
@@ -132,6 +136,10 @@ export function initLegacyEngine() {
                     .replace(/[^a-z0-9_./-]/g, '_');
             }
 
+            function waitForDelay(ms) {
+                return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+            }
+
             function normalizeModelConfig(modelValue) {
                 const ensureModelPath = (value) => {
                     const normalized = String(value || '').trim().replace(/^\/+/, '').replace(/^models\//i, '');
@@ -152,6 +160,35 @@ export function initLegacyEngine() {
             function buildModelGenerateContentUrl(modelConfig) {
                 const config = normalizeModelConfig(modelConfig);
                 return `https://generativelanguage.googleapis.com/${config.apiVersion}/${config.id}:generateContent?key=${apiKey}`;
+            }
+
+            async function fetchWithTimeout(url, options = {}, timeoutMs = CHAT_REQUEST_TIMEOUT_MS) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || CHAT_REQUEST_TIMEOUT_MS));
+                try {
+                    const response = await fetch(url, {
+                        ...options,
+                        signal: controller.signal
+                    });
+                    return {
+                        ok: true,
+                        response
+                    };
+                } catch (error) {
+                    const rawMessage = String(error?.name || error?.message || error || 'fetch_failed')
+                        .toLowerCase();
+                    const isTimeout =
+                        error?.name === 'AbortError' ||
+                        rawMessage.includes('aborted') ||
+                        rawMessage.includes('timeout');
+                    return {
+                        ok: false,
+                        reason: isTimeout ? 'request_timeout' : 'network_error',
+                        error
+                    };
+                } finally {
+                    clearTimeout(timeoutId);
+                }
             }
 
             // --- Persistent Storage (Firebase Initialization) ---
@@ -1700,10 +1737,27 @@ export function initLegacyEngine() {
                     }
                 }, 1000);
 
-                const response = await callGeminiAPI(promptText, {
-                    useWebGrounding,
-                    shouldUpdateWebSnapshot
-                });
+                let response = '';
+                try {
+                    response = await callGeminiAPI(promptText, {
+                        useWebGrounding,
+                        shouldUpdateWebSnapshot
+                    });
+                } catch (error) {
+                    const failureMessage = String(error?.message || error || 'chat_pipeline_failed')
+                        .toLowerCase()
+                        .replace(/[^a-z0-9_./-]/g, '_');
+                    response = "The AI model is temporarily unavailable right now. Please try again in a moment.";
+                    const lastRole = conversationHistory[conversationHistory.length - 1]?.role;
+                    if (lastRole !== 'model') {
+                        conversationHistory.push({ role: "model", parts: [{ text: response }] });
+                    }
+                    trackEvent('chat_response_pipeline_failed', {
+                        uses_web_grounding: useWebGrounding,
+                        reason: failureMessage
+                    });
+                    console.error("Chat response pipeline failed:", failureMessage);
+                }
                 trackEvent('chat_response_received', {
                     response_length: String(response || '').length,
                     uses_web_grounding: useWebGrounding,
@@ -1922,6 +1976,8 @@ export function initLegacyEngine() {
                         const modelId = modelConfig.id;
                         attemptedModelIds.push(modelId);
                         let did429Retry = false;
+                        let timeoutRetryCount = 0;
+                        let transientStatusRetryCount = 0;
 
                         while (true) {
                             trackEvent('chat_model_attempt_started', {
@@ -1942,11 +1998,33 @@ export function initLegacyEngine() {
                                     }
                                 }
 
-                                const res = await fetch(buildModelGenerateContentUrl(modelConfig), {
+                                const requestResult = await fetchWithTimeout(buildModelGenerateContentUrl(modelConfig), {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify(attemptPayload)
                                 });
+                                if (!requestResult.ok) {
+                                    allFailuresAre403 = false;
+                                    const reason = String(requestResult.reason || 'network_error');
+                                    lastFailureMessage = `${modelId} -> ${reason}`;
+                                    failedModelReasons.push(`${modelId}: ${reason}`);
+                                    trackEvent('chat_model_attempt_failed', {
+                                        uses_web_grounding: requestUsesWebGrounding,
+                                        model_id: modelId,
+                                        api_version: modelConfig.apiVersion,
+                                        failure_reason: reason,
+                                        timed_out: reason === 'request_timeout'
+                                    });
+
+                                    if ((reason === 'request_timeout' || reason === 'network_error') && timeoutRetryCount < CHAT_MAX_TIMEOUT_RETRIES) {
+                                        timeoutRetryCount += 1;
+                                        await waitForDelay(CHAT_RETRY_DELAY_MS * timeoutRetryCount);
+                                        continue;
+                                    }
+                                    break;
+                                }
+
+                                const res = requestResult.response;
 
                                 if (!res.ok) {
                                     lastStatusCode = res.status;
@@ -1969,12 +2047,17 @@ export function initLegacyEngine() {
                                     if (res.status === 429) {
                                         if (!did429Retry) {
                                             did429Retry = true;
-                                            await new Promise(resolve => setTimeout(resolve, 1500));
+                                            await waitForDelay(1500);
                                             continue;
                                         }
                                         break;
                                     }
-                                    if (res.status === 500 || res.status === 503) {
+                                    if ([408, 425, 500, 502, 503, 504].includes(res.status)) {
+                                        if (transientStatusRetryCount < CHAT_MAX_TRANSIENT_HTTP_RETRIES) {
+                                            transientStatusRetryCount += 1;
+                                            await waitForDelay(CHAT_RETRY_DELAY_MS * transientStatusRetryCount);
+                                            continue;
+                                        }
                                         break;
                                     }
                                     break;
