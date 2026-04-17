@@ -81,6 +81,7 @@ export function initLegacyEngine() {
             const AUTH_RESET_MAX_COOLDOWN_MS = 5 * 60 * 1000;
             const AUTH_RESET_BACKOFF_RESET_MS = 15 * 60 * 1000;
             const AUTH_FORGOT_PASSWORD_BUTTON_DEFAULT_LABEL = 'Forgot password?';
+            const ASSISTANT_IDENTITY_NAME = 'Ephemeral Core';
             const CHAT_REQUEST_TIMEOUT_MS = 18000;
             const CHAT_RETRY_DELAY_MS = 1200;
             const CHAT_MAX_TIMEOUT_RETRIES = 1;
@@ -1095,7 +1096,7 @@ export function initLegacyEngine() {
                     return "Hey! How's it going?";
                 }
                 if (/(^|\b)(who are you|what are you|introduce yourself)(\b|$)/.test(normalized)) {
-                    return "I'm your chat buddy here. Ask me anything and I'll keep it clear and short.";
+                    return `I'm ${ASSISTANT_IDENTITY_NAME}. Ask me anything and I'll keep it clear and short.`;
                 }
                 if (normalized.length <= 30) {
                     return "I'm here. Tell me what you need and I'll keep it short.";
@@ -1964,7 +1965,8 @@ export function initLegacyEngine() {
                 // Inject it silently into the AI's brain
                 const baseInstruction = personas[currentPersonaId].prompt;
                 const webSnapshotInstruction = buildWebSnapshotInstruction();
-                const aiInstruction = `${baseInstruction} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.${webSnapshotInstruction ? `\n\n${webSnapshotInstruction}` : ''}`;
+                const identityInstruction = `If the user asks who you are, your name, or your identity, answer that you are ${ASSISTANT_IDENTITY_NAME}.`;
+                const aiInstruction = `${baseInstruction} ${identityInstruction} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.${webSnapshotInstruction ? `\n\n${webSnapshotInstruction}` : ''}`;
                 
                 const payload = {
                     contents: conversationHistory,
