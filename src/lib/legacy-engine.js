@@ -1,6 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification, signOut, onAuthStateChanged, reload, GoogleAuthProvider, signInWithPopup, getAdditionalUserInfo } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { DEFAULT_MODEL_API_VERSION, GENERAL_CHAT_MODELS, WEB_GROUNDED_MODELS } from "./gemini-api";
 
 export function initLegacyEngine() {
         
@@ -50,18 +51,6 @@ export function initLegacyEngine() {
             
             const env = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env : {};
             const apiKey = env.VITE_GEMINI_API_KEY || "API_KEY_PLACEHOLDER";
-            const DEFAULT_MODEL_API_VERSION = "v1beta";
-            const GENERAL_CHAT_MODELS = [
-                { id: "models/gemini-3.1-flash-lite-preview", apiVersion: "v1beta" },
-                { id: "models/gemini-3-flash-preview", apiVersion: "v1beta" }
-                // { id: "models/gemma-4-31b-it", apiVersion: "v1beta" },
-                // { id: "models/gemma-3-27b-it", apiVersion: "v1beta" },
-                // { id: "models/gemma-3-12b-it", apiVersion: "v1beta" }
-            ];
-            const WEB_GROUNDED_MODELS = [
-                { id: "models/gemini-2.5-flash-lite", apiVersion: "v1beta" },
-                { id: "models/gemini-2.5-flash", apiVersion: "v1beta" }
-            ];
             const ENABLE_MAP_GROUNDING = false;
             const fallbackFirebaseConfig = {
                 apiKey: env.VITE_FIREBASE_API_KEY || "API_KEY_PLACEHOLDER",
