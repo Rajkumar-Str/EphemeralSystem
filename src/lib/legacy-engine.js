@@ -1756,6 +1756,12 @@ export function initLegacyEngine() {
                         uses_web_grounding: useWebGrounding,
                         reason: failureMessage
                     });
+                    if (window.saveToArchive) {
+                        window.saveToArchive().catch(e => {
+                            trackEvent('chat_archive_save_failed');
+                            console.error(e);
+                        });
+                    }
                     console.error("Chat response pipeline failed:", failureMessage);
                 }
                 trackEvent('chat_response_received', {
@@ -1932,6 +1938,17 @@ export function initLegacyEngine() {
             async function callGeminiAPI(query, options = {}) {
                 const useWebGrounding = !!options.useWebGrounding;
                 const shouldUpdateWebSnapshot = !!options.shouldUpdateWebSnapshot;
+                const persistModelReply = (textValue) => {
+                    const safeText = String(textValue || '').trim();
+                    if (!safeText) return;
+                    conversationHistory.push({ role: "model", parts: [{ text: safeText }] });
+                    if (window.saveToArchive) {
+                        window.saveToArchive().catch(e => {
+                            trackEvent('chat_archive_save_failed');
+                            console.error(e);
+                        });
+                    }
+                };
                 const activeSnapshotForThisTurn = !useWebGrounding ? getActiveWebSnapshot() : null;
                 latestResponseMeta = {
                     usedCachedSnapshot: !!activeSnapshotForThisTurn,
@@ -2117,7 +2134,7 @@ export function initLegacyEngine() {
                     : null;
 
                 if (webAttempt?.success) {
-                    conversationHistory.push({ role: "model", parts: [{ text: webAttempt.text }] });
+                    persistModelReply(webAttempt.text);
                     trackEvent('chat_model_success', {
                         uses_web_grounding: true,
                         model_id: webAttempt.modelId,
@@ -2130,40 +2147,28 @@ export function initLegacyEngine() {
                             source_count: latestResponseMeta.groundedSources.length
                         });
                     }
-                    if (window.saveToArchive) {
-                        window.saveToArchive().catch(e => {
-                            trackEvent('chat_archive_save_failed');
-                            console.error(e);
-                        });
-                    }
                     return webAttempt.text;
                 }
 
                 if (useWebGrounding && webAttempt?.allFailuresAre403) {
                     const generalAttempt = await tryModelList(GENERAL_CHAT_MODELS, false);
                     if (generalAttempt.success) {
-                        const prefixedResponse = `Search is currently restricted on this key; responding with general knowledge.\n\n${generalAttempt.text}`;
-                        conversationHistory.push({ role: "model", parts: [{ text: prefixedResponse }] });
+                        const prefixedResponse = `Live search is unavailable right now, so I answered from general knowledge.\n\n${generalAttempt.text}`;
+                        persistModelReply(prefixedResponse);
                         trackEvent('chat_model_success', {
                             uses_web_grounding: false,
                             model_id: generalAttempt.modelId,
                             api_version: DEFAULT_MODEL_API_VERSION,
                             source: 'web_fallback_to_general'
                         });
-                        if (window.saveToArchive) {
-                            window.saveToArchive().catch(e => {
-                                trackEvent('chat_archive_save_failed');
-                                console.error(e);
-                            });
-                        }
                         return prefixedResponse;
                     }
                     const combinedReasons = [
                         ...(webAttempt?.failedModelReasons || []),
                         ...(generalAttempt.failedModelReasons || [])
                     ];
-                    const fallbackText = `The AI model is temporarily unavailable right now. Please try again in a moment. Failed attempts: ${combinedReasons.slice(0, 3).join(' | ')}`;
-                    conversationHistory.push({ role: "model", parts: [{ text: fallbackText }] });
+                    const fallbackText = `Live search is unavailable right now, and normal chat is also unavailable. Please try again in a moment.`;
+                    persistModelReply(fallbackText);
                     trackEvent('chat_model_failed', {
                         uses_web_grounding: false,
                         status_code: generalAttempt.lastStatusCode || webAttempt?.lastStatusCode || 0,
@@ -2182,18 +2187,12 @@ export function initLegacyEngine() {
                 const fallbackAttempt = useWebGrounding ? null : await tryModelList(GENERAL_CHAT_MODELS, false);
 
                 if (!useWebGrounding && fallbackAttempt?.success) {
-                    conversationHistory.push({ role: "model", parts: [{ text: fallbackAttempt.text }] });
+                    persistModelReply(fallbackAttempt.text);
                     trackEvent('chat_model_success', {
                         uses_web_grounding: false,
                         model_id: fallbackAttempt.modelId,
                         api_version: DEFAULT_MODEL_API_VERSION
                     });
-                    if (window.saveToArchive) {
-                        window.saveToArchive().catch(e => {
-                            trackEvent('chat_archive_save_failed');
-                            console.error(e);
-                        });
-                    }
                     return fallbackAttempt.text;
                 }
 
@@ -2201,13 +2200,12 @@ export function initLegacyEngine() {
                 const finalAttemptedModels = useWebGrounding ? attemptedModels : (fallbackAttempt?.attemptedModelIds || []);
                 const finalStatusCode = useWebGrounding ? (webAttempt?.lastStatusCode || 0) : (fallbackAttempt?.lastStatusCode || 0);
                 const finalFailureMessage = useWebGrounding ? webAttempt?.lastFailureMessage : fallbackAttempt?.lastFailureMessage;
-                const shortFailureSummary = finalFailedModels.slice(0, 3).join(' | ');
 
                 const finalFallbackText = useWebGrounding
-                    ? `Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.${shortFailureSummary ? ` Failed attempts: ${shortFailureSummary}` : ''}`
-                    : `The AI model is temporarily unavailable right now. Please try again in a moment.${shortFailureSummary ? ` Failed attempts: ${shortFailureSummary}` : ''}`;
+                    ? `Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.`
+                    : `The AI model is temporarily unavailable right now. Please try again in a moment.`;
 
-                conversationHistory.push({ role: "model", parts: [{ text: finalFallbackText }] });
+                persistModelReply(finalFallbackText);
                 trackEvent('chat_model_failed', {
                     uses_web_grounding: useWebGrounding,
                     status_code: finalStatusCode,
