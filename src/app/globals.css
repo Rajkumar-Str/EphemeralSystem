@@ -1015,6 +1015,155 @@
                 flex-wrap: wrap;
             }
         }
+
+        @media (max-width: 1024px) {
+            #stage {
+                padding: 2.6rem 1.4rem 4.6rem;
+            }
+
+            #response-container {
+                width: min(100%, 95vw);
+                max-height: min(66vh, 680px);
+                margin-top: -8vh;
+                padding: 62px 26px;
+            }
+
+            .ai-text.formatted-output {
+                max-width: min(58ch, 100%);
+            }
+
+            #history-stack {
+                left: 1.3rem;
+                bottom: 1.15rem;
+                width: min(360px, 62vw);
+                height: 148px;
+                padding: 24px 0;
+            }
+
+            #controls-container {
+                top: 1.2rem;
+                right: 1.2rem;
+                gap: 1rem;
+            }
+
+            .sys-indicator {
+                width: 92px;
+                font-size: 0.84rem;
+                letter-spacing: 0.16em;
+            }
+
+            .overlay-content {
+                width: min(94vw, 820px);
+                max-height: 86vh;
+            }
+
+            .overlay-title {
+                font-size: clamp(1.2rem, 3.5vw, 1.7rem);
+                letter-spacing: 0.2em;
+                margin-bottom: 1.7rem;
+                white-space: normal;
+            }
+
+            .overlay-list {
+                gap: 1rem;
+            }
+
+            .overlay-item {
+                gap: 0.9rem;
+                padding: 0.52rem;
+            }
+
+            .overlay-cmd {
+                font-size: 1rem;
+            }
+
+            .overlay-desc {
+                font-size: 0.9rem;
+            }
+
+            #status-text {
+                bottom: 1.2rem;
+                letter-spacing: 0.26em;
+            }
+        }
+
+        @media (max-width: 640px) {
+            #stage {
+                padding: 2.1rem 0.95rem 4.25rem;
+            }
+
+            #response-container {
+                margin-top: -2vh;
+                max-height: 62vh;
+                padding: 36px 14px 28px;
+            }
+
+            .ai-text {
+                font-size: clamp(1.2rem, 5.5vw, 1.65rem);
+                line-height: 1.58;
+                word-spacing: 0.16em;
+            }
+
+            .ai-text.formatted-output {
+                max-width: 100%;
+                font-size: clamp(1rem, 4.7vw, 1.3rem);
+                line-height: 1.66;
+                word-spacing: 0.03em;
+            }
+
+            #history-stack {
+                left: 0.85rem;
+                bottom: 0.95rem;
+                width: min(300px, 78vw);
+                height: 116px;
+                padding: 18px 0;
+                gap: 0.4rem;
+            }
+
+            .history-item {
+                font-size: clamp(0.85rem, 4.3vw, 1.05rem);
+            }
+
+            #controls-container {
+                top: 0.95rem;
+                right: 0.9rem;
+                gap: 0.75rem;
+            }
+
+            .sys-indicator {
+                width: 80px;
+                font-size: 0.74rem;
+                letter-spacing: 0.13em;
+            }
+
+            .overlay-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.32rem;
+                padding: 0.5rem 0.3rem;
+            }
+
+            .overlay-cmd {
+                width: 100%;
+                text-align: left !important;
+                font-size: 0.88rem;
+            }
+
+            .overlay-desc {
+                width: 100%;
+                font-size: 0.8rem;
+            }
+
+            #status-text {
+                font-size: 0.64rem;
+                letter-spacing: 0.18em;
+                bottom: 0.8rem;
+            }
+
+            #scroll-indicator {
+                bottom: 19vh;
+            }
+        }
     
 
 
