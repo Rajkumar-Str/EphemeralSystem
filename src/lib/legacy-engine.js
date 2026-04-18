@@ -107,6 +107,7 @@ export function initLegacyEngine() {
             const CHAT_LOCAL_CACHE_MAX_TURNS = 120;
             const CHAT_PERSIST_MAX_TURNS = 180;
             const CHAT_PERSIST_MAX_TEXT_LENGTH = 6000;
+            const INPUT_LONG_FORM_THRESHOLD = 180;
             const MEMORY_CLEAR_CONFIRM_WINDOW_MS = 15000;
             const CHAT_MEMORY_SCOPE = Object.freeze({
                 localCache: 'device + user + chat',
@@ -2246,6 +2247,22 @@ export function initLegacyEngine() {
                 setTimeout(() => { if (currentState === 'INPUT') ambientCore.className = 'state-idle'; }, 2000);
             }
 
+            function syncInputLongFormMode() {
+                const rawText = String(inputField?.innerText || '').replace(/\u200B/g, '');
+                const normalizedText = rawText.trim();
+                if (!normalizedText) {
+                    inputField.classList.remove('long-form');
+                    return;
+                }
+                const lines = rawText.split(/\r?\n/);
+                const longestLine = lines.reduce((maxLen, line) => Math.max(maxLen, line.length), 0);
+                const shouldUseLongForm =
+                    rawText.length >= INPUT_LONG_FORM_THRESHOLD ||
+                    lines.length >= 3 ||
+                    longestLine >= 72;
+                inputField.classList.toggle('long-form', shouldUseLongForm);
+            }
+
             buildToneMenu();
             buildChatsMenu();
             hydrateChatFromLocalCache('app_boot');
@@ -2263,9 +2280,11 @@ export function initLegacyEngine() {
             updateAuthSessionUI();
             setAuthBusy(false);
             inputField.focus();
+            syncInputLongFormMode();
 
             // --- Core Listeners ---
             inputField.addEventListener('input', () => {
+                syncInputLongFormMode();
                 if (currentState === 'INPUT') {
                     ambientCore.className = 'state-typing';
                     clearTimeout(coreTypingTimeout);
@@ -3740,6 +3759,7 @@ export function initLegacyEngine() {
                 statusText.textContent = "System Awaiting";
                 scrollIndicator.style.opacity = '0'; 
                 inputField.innerText = '';
+                syncInputLongFormMode();
                 outputField.innerHTML = '';
             }
 
