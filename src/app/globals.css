@@ -382,13 +382,28 @@
             z-index: 20;
             transition: opacity 0.5s;
         }
-        
+
         .pulse-text {
             animation: text-pulse 2s infinite;
         }
         @keyframes text-pulse {
             0%, 100% { opacity: 0.3; }
             50% { opacity: 1; color: var(--theme-color); text-shadow: 0 0 10px rgba(var(--theme-rgb), 0.5); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .letter {
+                animation: none;
+                opacity: 1;
+                filter: none;
+                transform: none;
+            }
+
+            #scroll-indicator,
+            .pulse-text {
+                animation: none;
+                transition: none;
+            }
         }
 
         /* --- Updated Controls Container --- */

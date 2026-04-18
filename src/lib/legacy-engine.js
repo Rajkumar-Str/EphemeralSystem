@@ -241,6 +241,14 @@ export function initLegacyEngine() {
             const graphemeSegmenter = (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function')
                 ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
                 : null;
+            const prefersReducedMotion = typeof window !== 'undefined'
+                && typeof window.matchMedia === 'function'
+                && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            const estimatedDeviceMemoryGb = Number((typeof navigator !== 'undefined' && navigator.deviceMemory) || 0);
+            const hardwareThreads = Number((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 0);
+            const lowEndDevice = (estimatedDeviceMemoryGb > 0 && estimatedDeviceMemoryGb <= 4)
+                || (hardwareThreads > 0 && hardwareThreads <= 4);
+            const lightweightAnimationMode = prefersReducedMotion || lowEndDevice;
             let webSnapshot = null;
             let lastWebQuery = '';
             let latestResponseMeta = {
@@ -566,6 +574,10 @@ export function initLegacyEngine() {
 
             function waitForDelay(ms) {
                 return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+            }
+
+            function shouldUseLightweightAnimation() {
+                return !!lightweightAnimationMode;
             }
 
             function readDualReplyModeState() {
@@ -2709,7 +2721,7 @@ export function initLegacyEngine() {
 
                 currentState = 'PROCESSING';
                 ambientCore.className = 'state-processing';
-                statusText.textContent = useWebGrounding ? "Grounding Search" : "Synthesizing";
+                statusText.textContent = useWebGrounding ? "Searching live sources..." : "Thinking...";
                 statusText.classList.add('pulse-text');
                 
                 const placeholder = document.createElement('div');
@@ -3310,7 +3322,7 @@ export function initLegacyEngine() {
                 currentState = 'READING';
                 ambientCore.className = 'state-reading';
                 isTyping = true;
-                statusText.textContent = "Press any key to continue";
+                statusText.textContent = "Ready - press any key";
                 statusText.classList.remove('pulse-text');
                 outputField.innerHTML = '';
                 responseContainer.scrollTop = 0;
@@ -3344,6 +3356,24 @@ export function initLegacyEngine() {
                     } catch (mathError) {
                         console.warn('Math render skipped:', mathError);
                     }
+                    checkScroll();
+                    if (currentRenderToken === myToken) {
+                        isTyping = false;
+                        resetDecayTimer();
+                    }
+                    return;
+                }
+
+                const lightweightMode = shouldUseLightweightAnimation();
+
+                if (lightweightMode && !isFastRecall) {
+                    const lines = formattedText.split('\n');
+                    lines.forEach((line, index) => {
+                        outputField.appendChild(document.createTextNode(line));
+                        if (index < lines.length - 1) {
+                            outputField.appendChild(document.createElement('br'));
+                        }
+                    });
                     checkScroll();
                     if (currentRenderToken === myToken) {
                         isTyping = false;
