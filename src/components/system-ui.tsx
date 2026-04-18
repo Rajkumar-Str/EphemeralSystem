@@ -28,6 +28,14 @@ export default function SystemUI() {
                         <div className="overlay-desc">Shift the system's operational persona.</div>
                     </div>
                     <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/dual</div>
+                        <div className="overlay-desc">Check dual reply mode status (Quick + Deep lanes).</div>
+                    </div>
+                    <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/dual on | /dual off</div>
+                        <div className="overlay-desc">Enable or disable two-lane responses in one turn.</div>
+                    </div>
+                    <div className="overlay-item">
                         <div className="overlay-cmd" style={{textAlign: 'right'}}>/help</div>
                         <div className="overlay-desc">Reveal this index of directives.</div>
                     </div>

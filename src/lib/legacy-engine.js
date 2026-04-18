@@ -77,6 +77,7 @@ export function initLegacyEngine() {
             const WEB_SNAPSHOT_MAX_CHARS = 900;
             const WEB_SNAPSHOT_MAX_SOURCES = 3;
             const AUTH_RESET_COOLDOWN_STORAGE_KEY = 'ephemeral_auth_reset_cooldown_v1';
+            const DUAL_REPLY_MODE_STORAGE_KEY = 'ephemeral_dual_reply_mode_v1';
             const AUTH_RESET_BASE_COOLDOWN_MS = 30 * 1000;
             const AUTH_RESET_MAX_COOLDOWN_MS = 5 * 60 * 1000;
             const AUTH_RESET_BACKOFF_RESET_MS = 15 * 60 * 1000;
@@ -86,6 +87,7 @@ export function initLegacyEngine() {
             const CHAT_RETRY_DELAY_MS = 1200;
             const CHAT_MAX_TIMEOUT_RETRIES = 1;
             const CHAT_MAX_TRANSIENT_HTTP_RETRIES = 1;
+            const DUAL_REPLY_MAX_QUICK_SENTENCES = 2;
             let webSnapshot = null;
             let lastWebQuery = '';
             let latestResponseMeta = {
@@ -103,6 +105,7 @@ export function initLegacyEngine() {
             let authResetAttemptCount = 0;
             let authResetLastAttemptAt = 0;
             let authResetCooldownInterval = null;
+            let dualReplyModeEnabled = false;
 
             function trackEvent(eventName, params = {}) {
                 try {
@@ -128,6 +131,97 @@ export function initLegacyEngine() {
 
             function waitForDelay(ms) {
                 return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+            }
+
+            function readDualReplyModeState() {
+                if (typeof window === 'undefined') return;
+                try {
+                    const raw = localStorage.getItem(DUAL_REPLY_MODE_STORAGE_KEY);
+                    if (!raw) {
+                        dualReplyModeEnabled = false;
+                        return;
+                    }
+                    const parsed = JSON.parse(raw);
+                    dualReplyModeEnabled = !!parsed?.enabled;
+                } catch (_) {
+                    dualReplyModeEnabled = false;
+                }
+            }
+
+            function persistDualReplyModeState() {
+                if (typeof window === 'undefined') return;
+                try {
+                    localStorage.setItem(DUAL_REPLY_MODE_STORAGE_KEY, JSON.stringify({
+                        enabled: dualReplyModeEnabled
+                    }));
+                } catch (_) {
+                    // Ignore storage write failures.
+                }
+            }
+
+            function setDualReplyMode(nextEnabled, source = 'command') {
+                const normalized = !!nextEnabled;
+                if (dualReplyModeEnabled === normalized) return false;
+                dualReplyModeEnabled = normalized;
+                persistDualReplyModeState();
+                trackEvent('dual_reply_mode_changed', {
+                    enabled: dualReplyModeEnabled,
+                    source: String(source || 'unknown')
+                });
+                return true;
+            }
+
+            function formatDualReplyStatusText() {
+                if (dualReplyModeEnabled) {
+                    return 'Dual reply mode is ON. Every answer returns two lanes: Quick and Deep.';
+                }
+                return 'Dual reply mode is OFF. Answers return in the normal single-lane format.';
+            }
+
+            function takeLeadingSentences(rawText, maxSentences = DUAL_REPLY_MAX_QUICK_SENTENCES) {
+                const normalized = String(rawText || '').replace(/\s+/g, ' ').trim();
+                if (!normalized) return '';
+                const sentences = normalized.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+                return sentences.slice(0, Math.max(1, Number(maxSentences) || 1)).join(' ').trim();
+            }
+
+            function normalizeDualReplyText(rawText, query) {
+                const source = String(rawText || '').replace(/\r\n/g, '\n').trim();
+                const safeFallback = buildSafeConversationalFallback(query);
+                if (!source) {
+                    return `Quick: ${safeFallback}\n\nDeep: ${safeFallback}`;
+                }
+
+                const quickMatch = source.match(/(?:^|\n)\s*quick\s*[:\-]\s*([\s\S]*?)(?=\n\s*deep\s*[:\-]|$)/i);
+                const deepMatch = source.match(/(?:^|\n)\s*deep\s*[:\-]\s*([\s\S]*)$/i);
+
+                let quick = quickMatch ? quickMatch[1].trim() : '';
+                let deep = deepMatch ? deepMatch[1].trim() : '';
+
+                if (!deep) {
+                    deep = source
+                        .replace(/(?:^|\n)\s*quick\s*[:\-]\s*/ig, '\n')
+                        .replace(/(?:^|\n)\s*deep\s*[:\-]\s*/ig, '\n')
+                        .replace(/\n{3,}/g, '\n\n')
+                        .trim();
+                }
+
+                if (!quick) {
+                    quick = takeLeadingSentences(deep || source, DUAL_REPLY_MAX_QUICK_SENTENCES) || safeFallback;
+                }
+
+                if (!deep) {
+                    deep = source;
+                }
+
+                const quickLane = quick.replace(/\s+/g, ' ').trim();
+                const deepLane = deep.replace(/\n{3,}/g, '\n\n').trim();
+
+                if (!deepLane || deepLane.toLowerCase() === quickLane.toLowerCase()) {
+                    return `Quick: ${quickLane}\n\nDeep: ${source}`;
+                }
+
+                return `Quick: ${quickLane}\n\nDeep: ${deepLane}`;
             }
 
             function normalizeModelConfig(modelValue) {
@@ -1206,6 +1300,7 @@ export function initLegacyEngine() {
 
             buildToneMenu();
             buildChatsMenu();
+            readDualReplyModeState();
             readPasswordResetThrottleState();
             if (getPasswordResetCooldownRemainingMs() > 0) {
                 startPasswordResetCooldownTicker();
@@ -1588,6 +1683,36 @@ export function initLegacyEngine() {
                     await showCommandResponse("Usage: /auth");
                     return;
                 }
+                if (queryText === '/dual' || queryText === '/dual status') {
+                    trackEvent('command_executed', { command_name: 'dual_status' });
+                    inputField.innerText = '';
+                    await showCommandResponse(formatDualReplyStatusText());
+                    return;
+                }
+                if (queryText === '/dual on') {
+                    trackEvent('command_executed', { command_name: 'dual_on' });
+                    inputField.innerText = '';
+                    const changed = setDualReplyMode(true, 'chat_command');
+                    await showCommandResponse(changed
+                        ? 'Dual reply mode enabled. You will now get Quick + Deep in the same response.'
+                        : 'Dual reply mode is already enabled.');
+                    return;
+                }
+                if (queryText === '/dual off') {
+                    trackEvent('command_executed', { command_name: 'dual_off' });
+                    inputField.innerText = '';
+                    const changed = setDualReplyMode(false, 'chat_command');
+                    await showCommandResponse(changed
+                        ? 'Dual reply mode disabled. Responses are back to normal single-lane output.'
+                        : 'Dual reply mode is already disabled.');
+                    return;
+                }
+                if (queryText.startsWith('/dual ')) {
+                    trackEvent('command_executed', { command_name: 'dual_invalid' });
+                    inputField.innerText = '';
+                    await showCommandResponse('Usage: /dual on, /dual off, or /dual status');
+                    return;
+                }
                 if (queryText === '/webstatus') {
                     trackEvent('command_executed', { command_name: 'webstatus' });
                     inputField.innerText = '';
@@ -1654,7 +1779,8 @@ export function initLegacyEngine() {
                 trackEvent('chat_prompt_submitted', {
                     prompt_length: promptText.length,
                     uses_web_grounding: useWebGrounding,
-                    uses_refresh_command: usedRefreshWebCommand
+                    uses_refresh_command: usedRefreshWebCommand,
+                    dual_reply_mode: dualReplyModeEnabled
                 });
 
                 currentState = 'PROCESSING';
@@ -1737,7 +1863,10 @@ export function initLegacyEngine() {
                     const failureMessage = String(error?.message || error || 'chat_pipeline_failed')
                         .toLowerCase()
                         .replace(/[^a-z0-9_./-]/g, '_');
-                    response = "The AI model is temporarily unavailable right now. Please try again in a moment.";
+                    const fallbackResponse = "The AI model is temporarily unavailable right now. Please try again in a moment.";
+                    response = dualReplyModeEnabled
+                        ? normalizeDualReplyText(fallbackResponse, promptText)
+                        : fallbackResponse;
                     const lastRole = conversationHistory[conversationHistory.length - 1]?.role;
                     if (lastRole !== 'model') {
                         conversationHistory.push({ role: "model", parts: [{ text: response }] });
@@ -1947,7 +2076,8 @@ export function initLegacyEngine() {
                 };
                 trackEvent('chat_model_request_started', {
                     uses_web_grounding: useWebGrounding,
-                    used_cached_snapshot: !!activeSnapshotForThisTurn
+                    used_cached_snapshot: !!activeSnapshotForThisTurn,
+                    dual_reply_mode: dualReplyModeEnabled
                 });
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
                 conversationHistory = conversationHistory.filter((entry) => {
@@ -1966,7 +2096,10 @@ export function initLegacyEngine() {
                 const baseInstruction = personas[currentPersonaId].prompt;
                 const webSnapshotInstruction = buildWebSnapshotInstruction();
                 const identityInstruction = `If the user asks who you are, your name, or your identity, answer that you are ${ASSISTANT_IDENTITY_NAME}.`;
-                const aiInstruction = `${baseInstruction} ${identityInstruction} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.${webSnapshotInstruction ? `\n\n${webSnapshotInstruction}` : ''}`;
+                const dualReplyInstruction = dualReplyModeEnabled
+                    ? 'Dual reply mode is enabled for this turn. Return exactly two lanes in this order with plain text labels only: "Quick: <1-2 short sentences>" then "Deep: <fuller explanation>". Do not add extra headings.'
+                    : '';
+                const aiInstruction = `${baseInstruction} ${identityInstruction}${dualReplyInstruction ? ` ${dualReplyInstruction}` : ''} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.${webSnapshotInstruction ? `\n\n${webSnapshotInstruction}` : ''}`;
                 
                 const payload = {
                     contents: conversationHistory,
@@ -2074,7 +2207,10 @@ export function initLegacyEngine() {
                                 const result = await res.json();
                                 const topCandidate = result.candidates?.[0] || {};
                                 const textParts = topCandidate?.content?.parts?.map(part => part?.text || '').filter(Boolean) || [];
-                                const aiText = sanitizeModelText((textParts.join('') || '').trim(), query);
+                                let aiText = sanitizeModelText((textParts.join('') || '').trim(), query);
+                                if (dualReplyModeEnabled) {
+                                    aiText = normalizeDualReplyText(aiText, query);
+                                }
 
                                 if (!aiText) {
                                     allFailuresAre403 = false;
@@ -2144,7 +2280,9 @@ export function initLegacyEngine() {
                 if (useWebGrounding && webAttempt?.allFailuresAre403) {
                     const generalAttempt = await tryModelList(GENERAL_CHAT_MODELS, false);
                     if (generalAttempt.success) {
-                        const prefixedResponse = `Live search is unavailable right now, so I answered from general knowledge.\n\n${generalAttempt.text}`;
+                        const prefixedResponse = dualReplyModeEnabled
+                            ? normalizeDualReplyText(`Search is currently restricted on this key, so this answer is from general knowledge.\n\n${generalAttempt.text}`, query)
+                            : `Live search is unavailable right now, so I answered from general knowledge.\n\n${generalAttempt.text}`;
                         persistModelReply(prefixedResponse);
                         trackEvent('chat_model_success', {
                             uses_web_grounding: false,
@@ -2158,7 +2296,10 @@ export function initLegacyEngine() {
                         ...(webAttempt?.failedModelReasons || []),
                         ...(generalAttempt.failedModelReasons || [])
                     ];
-                    const fallbackText = `Live search is unavailable right now, and normal chat is also unavailable. Please try again in a moment.`;
+                    const fallbackTextBase = `Live search is unavailable right now, and normal chat is also unavailable. Please try again in a moment.`;
+                    const fallbackText = dualReplyModeEnabled
+                        ? normalizeDualReplyText(fallbackTextBase, query)
+                        : fallbackTextBase;
                     persistModelReply(fallbackText);
                     trackEvent('chat_model_failed', {
                         uses_web_grounding: false,
@@ -2192,9 +2333,12 @@ export function initLegacyEngine() {
                 const finalStatusCode = useWebGrounding ? (webAttempt?.lastStatusCode || 0) : (fallbackAttempt?.lastStatusCode || 0);
                 const finalFailureMessage = useWebGrounding ? webAttempt?.lastFailureMessage : fallbackAttempt?.lastFailureMessage;
 
-                const finalFallbackText = useWebGrounding
+                const finalFallbackTextBase = useWebGrounding
                     ? `Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.`
                     : `The AI model is temporarily unavailable right now. Please try again in a moment.`;
+                const finalFallbackText = dualReplyModeEnabled
+                    ? normalizeDualReplyText(finalFallbackTextBase, query)
+                    : finalFallbackTextBase;
 
                 persistModelReply(finalFallbackText);
                 trackEvent('chat_model_failed', {
