@@ -2,6 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebas
         import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification, signOut, onAuthStateChanged, reload, GoogleAuthProvider, signInWithPopup, getAdditionalUserInfo, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { DEFAULT_MODEL_API_VERSION, GENERAL_CHAT_MODELS, WEB_GROUNDED_MODELS } from "./gemini-api";
+        import renderMathInElement from "katex/contrib/auto-render";
 
 export function initLegacyEngine() {
         
@@ -90,6 +91,144 @@ export function initLegacyEngine() {
             const CHAT_MAX_TRANSIENT_HTTP_RETRIES = 1;
             const DUAL_REPLY_MAX_QUICK_SENTENCES = 2;
             const COMMAND_MACRO_MAX_COUNT = 40;
+            const MATHBB_SYMBOL_MAP = Object.freeze({
+                N: 'ℕ',
+                Z: 'ℤ',
+                Q: 'ℚ',
+                R: 'ℝ',
+                C: 'ℂ',
+                H: 'ℍ',
+                P: 'ℙ'
+            });
+            const LOOSE_LATEX_SYMBOL_MAP = Object.freeze({
+                alpha: 'α',
+                beta: 'β',
+                gamma: 'γ',
+                delta: 'δ',
+                epsilon: 'ε',
+                varepsilon: 'ϵ',
+                zeta: 'ζ',
+                eta: 'η',
+                theta: 'θ',
+                vartheta: 'ϑ',
+                iota: 'ι',
+                kappa: 'κ',
+                lambda: 'λ',
+                mu: 'μ',
+                nu: 'ν',
+                xi: 'ξ',
+                pi: 'π',
+                varpi: 'ϖ',
+                rho: 'ρ',
+                varrho: 'ϱ',
+                sigma: 'σ',
+                varsigma: 'ς',
+                tau: 'τ',
+                upsilon: 'υ',
+                phi: 'φ',
+                varphi: 'ϕ',
+                chi: 'χ',
+                psi: 'ψ',
+                omega: 'ω',
+                Gamma: 'Γ',
+                Delta: 'Δ',
+                Theta: 'Θ',
+                Lambda: 'Λ',
+                Xi: 'Ξ',
+                Pi: 'Π',
+                Sigma: 'Σ',
+                Upsilon: 'Υ',
+                Phi: 'Φ',
+                Psi: 'Ψ',
+                Omega: 'Ω',
+                forall: '∀',
+                exists: '∃',
+                nexists: '∄',
+                in: '∈',
+                notin: '∉',
+                ni: '∋',
+                subset: '⊂',
+                subseteq: '⊆',
+                supset: '⊃',
+                supseteq: '⊇',
+                cup: '∪',
+                cap: '∩',
+                emptyset: '∅',
+                varnothing: '∅',
+                land: '∧',
+                lor: '∨',
+                neg: '¬',
+                times: '×',
+                div: '÷',
+                cdot: '⋅',
+                pm: '±',
+                mp: '∓',
+                ast: '∗',
+                star: '⋆',
+                le: '≤',
+                leq: '≤',
+                ge: '≥',
+                geq: '≥',
+                neq: '≠',
+                ne: '≠',
+                approx: '≈',
+                sim: '∼',
+                simeq: '≃',
+                cong: '≅',
+                equiv: '≡',
+                propto: '∝',
+                to: '→',
+                mapsto: '↦',
+                leftarrow: '←',
+                rightarrow: '→',
+                leftrightarrow: '↔',
+                Leftarrow: '⇐',
+                Rightarrow: '⇒',
+                Leftrightarrow: '⇔',
+                longrightarrow: '⟶',
+                longleftarrow: '⟵',
+                Longrightarrow: '⟹',
+                Longleftarrow: '⟸',
+                longleftrightarrow: '⟷',
+                Longleftrightarrow: '⟺',
+                uparrow: '↑',
+                downarrow: '↓',
+                updownarrow: '↕',
+                partial: '∂',
+                nabla: '∇',
+                infty: '∞',
+                infinity: '∞',
+                sum: '∑',
+                prod: '∏',
+                coprod: '∐',
+                int: '∫',
+                iint: '∬',
+                iiint: '∭',
+                oint: '∮',
+                angle: '∠',
+                measuredangle: '∡',
+                triangle: '△',
+                square: '□',
+                perp: '⟂',
+                parallel: '∥',
+                therefore: '∴',
+                because: '∵',
+                ldots: '…',
+                cdots: '⋯',
+                vdots: '⋮',
+                ddots: '⋱',
+                degree: '°',
+                prime: '′',
+                hbar: 'ħ',
+                ell: 'ℓ',
+                left: '',
+                right: '',
+                quad: ' ',
+                qquad: '  '
+            });
+            const graphemeSegmenter = (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function')
+                ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+                : null;
             let webSnapshot = null;
             let lastWebQuery = '';
             let latestResponseMeta = {
@@ -553,7 +692,7 @@ export function initLegacyEngine() {
 
             // --- Menu Builders ---
             const personas = {
-                system: { name: "SYSTEM", prompt: "You are a real, chill human hanging out in this chat. Do not ever refer to yourself as an AI, a system, or a language model. Talk naturally and casually like you're texting a friend. Keep your replies SHORT, punchy, and conversational (1-3 sentences max). Don't write long essays, real humans don't type that fast. Be genuine, relaxed, and keep it normal. NEVER use markdown formatting like asterisks or bold text." },
+                system: { name: "SYSTEM", prompt: "You are a real, chill human hanging out in this chat. Do not ever refer to yourself as an AI, a system, or a language model. Talk naturally and casually like you're texting a friend. Keep your replies conversational and clear. Use the response length that fits the request: short for simple prompts, detailed when the user asks for depth. Be genuine, relaxed, and keep it normal. NEVER use markdown formatting like asterisks or bold text." },
                 terminal: { name: "TERMINAL", prompt: "You are the Terminal interface of the System. You communicate with machine-like precision, framing your responses somewhat like a system log or console output. However, you remain conversational, helpful, and easily understandable—do not use overly deep, dense, or broken technical jargon. Deliver information clearly and logically. NEVER use markdown formatting like asterisks or bold text." }
             };
             let currentPersonaId = 'system';
@@ -1345,6 +1484,15 @@ export function initLegacyEngine() {
                 return matches.map((part) => part.trim()).filter(Boolean);
             }
 
+            function splitGraphemes(value) {
+                const text = String(value || '');
+                if (!text) return [];
+                if (graphemeSegmenter) {
+                    return Array.from(graphemeSegmenter.segment(text), (entry) => entry.segment);
+                }
+                return Array.from(text);
+            }
+
             function chunkSegments(segments, maxChars = 220, maxItems = 2) {
                 const chunks = [];
                 let current = [];
@@ -1372,6 +1520,35 @@ export function initLegacyEngine() {
                     .replace(/\s+([-*])\s+/g, '\n$1 ');
             }
 
+            function containsMathDelimiters(value) {
+                const text = String(value || '');
+                if (!text) return false;
+                return (
+                    /\$\$[\s\S]+?\$\$/.test(text) ||
+                    /(^|[^\$])\$[^\n$][\s\S]*?[^\n$]\$([^\$]|$)/.test(text) ||
+                    /\\\([\s\S]+?\\\)/.test(text) ||
+                    /\\\[[\s\S]+?\\\]/.test(text)
+                );
+            }
+
+            function normalizeLooseLatexSymbolCommands(value) {
+                let text = String(value || '');
+                if (!text || !/\\[a-zA-Z]/.test(text)) return text;
+
+                text = text
+                    .replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '$1/$2')
+                    .replace(/\\sqrt\s*\{([^{}]+)\}/g, '√($1)')
+                    .replace(/\\mathbb\s*\{([A-Za-z])\}/g, (_, letter) => MATHBB_SYMBOL_MAP[letter] || letter)
+                    .replace(/\\(?:mathbf|mathrm|mathit|mathsf)\s*\{([^{}]+)\}/g, '$1')
+                    .replace(/\\([%_#$&{}])/g, '$1');
+
+                text = text.replace(/\\([a-zA-Z]+)\b/g, (match, commandName) => {
+                    const mapped = LOOSE_LATEX_SYMBOL_MAP[commandName];
+                    return typeof mapped === 'string' ? mapped : match;
+                });
+                return text;
+            }
+
             function formatResponseForDisplay(rawText) {
                 let text = String(rawText || '')
                     .replace(/\r\n/g, '\n')
@@ -1379,6 +1556,16 @@ export function initLegacyEngine() {
                     .replace(/\n{3,}/g, '\n\n')
                     .trim();
                 if (!text) return '';
+
+                const hasMathDelimiters = containsMathDelimiters(text);
+                if (!hasMathDelimiters) {
+                    text = normalizeLooseLatexSymbolCommands(text);
+                }
+
+                // Keep math blocks intact; heavy paragraph heuristics can damage LaTeX.
+                if (hasMathDelimiters) {
+                    return text;
+                }
 
                 text = normalizeInlineListBreaks(text);
 
@@ -2740,9 +2927,40 @@ export function initLegacyEngine() {
                 if (isFastRecall) clearResponseMetaUI();
                 else renderResponseMeta();
                 const formattedText = formatResponseForDisplay(text);
+                const shouldRenderMath = containsMathDelimiters(formattedText);
                 const tokens = formattedText.split(/(\n|[ \t]+)/).filter(token => token.length > 0);
-                const usesStructuredLayout = formattedText.includes('\n') || formattedText.length > 260;
+                const usesStructuredLayout = shouldRenderMath || formattedText.includes('\n') || formattedText.length > 260;
                 outputField.classList.toggle('formatted-output', usesStructuredLayout);
+
+                if (shouldRenderMath) {
+                    const lines = formattedText.split('\n');
+                    lines.forEach((line, index) => {
+                        outputField.appendChild(document.createTextNode(line));
+                        if (index < lines.length - 1) {
+                            outputField.appendChild(document.createElement('br'));
+                        }
+                    });
+                    try {
+                        renderMathInElement(outputField, {
+                            delimiters: [
+                                { left: '$$', right: '$$', display: true },
+                                { left: '\\[', right: '\\]', display: true },
+                                { left: '$', right: '$', display: false },
+                                { left: '\\(', right: '\\)', display: false }
+                            ],
+                            throwOnError: false,
+                            strict: 'ignore'
+                        });
+                    } catch (mathError) {
+                        console.warn('Math render skipped:', mathError);
+                    }
+                    checkScroll();
+                    if (currentRenderToken === myToken) {
+                        isTyping = false;
+                        resetDecayTimer();
+                    }
+                    return;
+                }
                 
                 if (isFastRecall) {
                     let d = 0;
@@ -2759,7 +2977,7 @@ export function initLegacyEngine() {
                         }
                         const s = document.createElement('span');
                         s.style.whiteSpace = 'nowrap';
-                        token.split('').forEach(c => {
+                        splitGraphemes(token).forEach(c => {
                             const l = document.createElement('span');
                             l.className = 'letter';
                             l.textContent = c; 
@@ -2795,7 +3013,7 @@ export function initLegacyEngine() {
                     const s = document.createElement('span');
                     s.style.whiteSpace = 'nowrap';
                     outputField.appendChild(s);
-                    const chars = token.split('');
+                    const chars = splitGraphemes(token);
                     for (let j = 0; j < chars.length; j++) {
                         if (currentRenderToken !== myToken || currentState !== 'READING') return;
                         const l = document.createElement('span');

@@ -215,13 +215,19 @@
         #response-container::-webkit-scrollbar { display: none; }
 
         .ai-text {
-            font-family: 'Cinzel', serif;
+            font-family: 'Cinzel', 'STIX Two Text', 'Noto Sans Math', 'Noto Sans Symbols 2', 'Cambria Math', 'Segoe UI Symbol', 'Segoe UI Emoji', 'Cambria', 'Times New Roman', serif;
             font-size: clamp(1.5rem, 3vw, 2.5rem);
             line-height: 1.6;
             color: #EAEAEA;
             text-shadow: 0 0 20px rgba(var(--theme-rgb), 0.2);
             transition: color 1s ease, text-shadow 1s ease;
             word-spacing: 0.25em;
+        }
+
+        .ai-text .katex {
+            color: inherit;
+            text-shadow: none;
+            font-size: 1.02em;
         }
 
         .ai-text.formatted-output {

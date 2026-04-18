@@ -9,7 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/noto-sans-math": "^5.2.8",
+    "@fontsource/noto-sans-symbols-2": "^5.2.8",
+    "@fontsource/stix-two-text": "^5.2.8",
     "firebase": "^11.6.1",
+    "katex": "^0.16.45",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
