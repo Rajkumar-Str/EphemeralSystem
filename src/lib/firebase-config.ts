@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken } from 'firebase/auth';
+import { getAuth, signInAnonymously, signInWithCustomToken, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getAnalytics, isSupported, logEvent, type Analytics } from 'firebase/analytics';
 
@@ -162,9 +162,13 @@ export const trackAnalyticsEvent = async (
 };
 
 export const initAuth = async (customToken?: string) => {
-  if (customToken) {
-    return signInWithCustomToken(auth, customToken);
-  } else {
-    return signInAnonymously(auth);
+  try {
+    await setPersistence(auth, browserLocalPersistence);
+  } catch (error) {
+    console.warn('Auth persistence setup failed. Continuing with default persistence.', error);
   }
+
+  if (auth.currentUser) return auth.currentUser;
+  if (customToken) return signInWithCustomToken(auth, customToken);
+  return signInAnonymously(auth);
 };

@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification, signOut, onAuthStateChanged, reload, GoogleAuthProvider, signInWithPopup, getAdditionalUserInfo } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification, signOut, onAuthStateChanged, reload, GoogleAuthProvider, signInWithPopup, getAdditionalUserInfo, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { DEFAULT_MODEL_API_VERSION, GENERAL_CHAT_MODELS, WEB_GROUNDED_MODELS } from "./gemini-api";
 
@@ -462,14 +462,23 @@ export function initLegacyEngine() {
                     });
 
                     const initAuth = async () => {
+                        try {
+                            await setPersistence(auth, browserLocalPersistence);
+                        } catch (persistenceError) {
+                            console.warn("Auth persistence setup failed. Falling back to default persistence.", persistenceError);
+                        }
+
+                        // Device-first: if browser already has a Firebase session, keep it.
+                        const restoredUser = await readInitialAuthState();
+                        if (restoredUser) return;
+
+                        // Only use token bootstrap when there is no restored local session.
                         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                             await signInWithCustomToken(auth, __initial_auth_token);
                             return;
                         }
 
-                        const restoredUser = await readInitialAuthState();
-                        if (restoredUser) return;
-
+                        // Last resort: create one anonymous session for this device browser.
                         try {
                             await signInAnonymously(auth);
                         } catch (anonymousAuthError) {
