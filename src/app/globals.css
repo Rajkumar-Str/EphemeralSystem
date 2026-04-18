@@ -361,7 +361,7 @@
 
         .grounding-source-card {
             display: grid;
-            grid-template-columns: auto 1fr auto;
+            grid-template-columns: auto 1fr;
             align-items: center;
             gap: 0.65rem;
             padding: 0.55rem 0.75rem;
@@ -392,6 +392,13 @@
             color: #c8a35f;
         }
 
+        .source-body {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
+        }
+
         .source-title {
             font-family: 'Outfit', sans-serif;
             font-size: 0.87rem;
@@ -401,12 +408,28 @@
             white-space: nowrap;
         }
 
+        .source-meta {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            min-width: 0;
+        }
+
         .source-host {
             font-family: 'Outfit', sans-serif;
             font-size: 0.72rem;
             letter-spacing: 0.04em;
             color: #9d9d9d;
             text-transform: lowercase;
+        }
+
+        .source-freshness {
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.68rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: #c8a35f;
+            opacity: 0.85;
         }
 
         .state-reading #input-container {
@@ -988,9 +1011,8 @@
                 grid-template-columns: auto 1fr;
             }
 
-            .source-host {
-                grid-column: 2 / -1;
-                margin-left: 0.1rem;
+            .source-meta {
+                flex-wrap: wrap;
             }
         }
     

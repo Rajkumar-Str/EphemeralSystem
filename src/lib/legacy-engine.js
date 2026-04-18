@@ -78,6 +78,11 @@ export function initLegacyEngine() {
             const WEB_SNAPSHOT_TTL_MS = 12 * 60 * 60 * 1000;
             const WEB_SNAPSHOT_MAX_CHARS = 900;
             const WEB_SNAPSHOT_MAX_SOURCES = 3;
+            const WEB_REQUEST_TIMEOUT_MS = 22000;
+            const WEB_MAX_TIMEOUT_RETRIES = 2;
+            const WEB_MAX_TRANSIENT_HTTP_RETRIES = 2;
+            const WEB_MAX_RATE_LIMIT_RETRIES = 1;
+            const WEB_RATE_LIMIT_RETRY_DELAY_MS = 1800;
             const AUTH_RESET_COOLDOWN_STORAGE_KEY = 'ephemeral_auth_reset_cooldown_v1';
             const DUAL_REPLY_MODE_STORAGE_KEY = 'ephemeral_dual_reply_mode_v1';
             const COMMAND_MACROS_STORAGE_KEY = 'ephemeral_command_macros_v1';
@@ -91,6 +96,8 @@ export function initLegacyEngine() {
             const CHAT_RETRY_DELAY_MS = 1200;
             const CHAT_MAX_TIMEOUT_RETRIES = 1;
             const CHAT_MAX_TRANSIENT_HTTP_RETRIES = 1;
+            const CHAT_MAX_RATE_LIMIT_RETRIES = 1;
+            const CHAT_RATE_LIMIT_RETRY_DELAY_MS = 1500;
             const DUAL_REPLY_MAX_QUICK_SENTENCES = 2;
             const COMMAND_MACRO_MAX_COUNT = 40;
             const CHAT_LOCAL_CACHE_NAMESPACE = 'ephemeral_chat_cache_v1';
@@ -1125,7 +1132,27 @@ export function initLegacyEngine() {
                 return webSnapshot;
             }
 
-            function extractGroundedSources(groundingMetadata) {
+            function getSourceDomain(uri) {
+                try {
+                    return new URL(uri).hostname.replace(/^www\./i, '');
+                } catch (_) {
+                    return uri;
+                }
+            }
+
+            function formatSourceFreshnessLabel(capturedAtMs) {
+                const timestamp = Number(capturedAtMs) || Date.now();
+                const ageMs = Math.max(0, Date.now() - timestamp);
+                if (ageMs < 45 * 1000) return 'just now';
+                const ageMinutes = Math.max(1, Math.round(ageMs / 60000));
+                if (ageMinutes < 60) return `${ageMinutes}m ago`;
+                const ageHours = Math.max(1, Math.round(ageMinutes / 60));
+                if (ageHours < 24) return `${ageHours}h ago`;
+                const ageDays = Math.max(1, Math.round(ageHours / 24));
+                return `${ageDays}d ago`;
+            }
+
+            function extractGroundedSources(groundingMetadata, capturedAtMs = Date.now()) {
                 const chunks = groundingMetadata?.groundingChunks || [];
                 const seen = new Set();
                 const sources = [];
@@ -1135,7 +1162,9 @@ export function initLegacyEngine() {
                     seen.add(uri);
                     sources.push({
                         title: chunk?.web?.title || uri,
-                        uri
+                        uri,
+                        domain: getSourceDomain(uri),
+                        capturedAt: capturedAtMs
                     });
                     if (sources.length >= WEB_SNAPSHOT_MAX_SOURCES) break;
                 }
@@ -1143,6 +1172,7 @@ export function initLegacyEngine() {
             }
 
             function updateWebSnapshot(query, responseText, groundingMetadata) {
+                const capturedAt = Date.now();
                 const cleanSummary = (responseText || '').replace(/\s+/g, ' ').trim();
                 const summary = cleanSummary.length > WEB_SNAPSHOT_MAX_CHARS
                     ? `${cleanSummary.substring(0, WEB_SNAPSHOT_MAX_CHARS)}...`
@@ -1150,10 +1180,11 @@ export function initLegacyEngine() {
                 webSnapshot = {
                     query,
                     summary,
-                    sources: extractGroundedSources(groundingMetadata),
-                    capturedAt: Date.now()
+                    sources: extractGroundedSources(groundingMetadata, capturedAt),
+                    capturedAt
                 };
                 lastWebQuery = query;
+                return webSnapshot;
             }
 
             function buildWebSnapshotInstruction() {
@@ -1195,9 +1226,62 @@ export function initLegacyEngine() {
                     minute: 'numeric'
                 });
                 const sourcePreview = activeSnapshot.sources.length
-                    ? activeSnapshot.sources.map((source, index) => `${index + 1}. ${source.title}`).join('\n')
+                    ? activeSnapshot.sources.map((source, index) => `${index + 1}. ${source.title} (${source.domain || getSourceDomain(source.uri)}) - ${formatSourceFreshnessLabel(source.capturedAt || activeSnapshot.capturedAt)}`).join('\n')
                     : 'No source links captured.';
                 return `Web snapshot active (${ageMinutes} min old).\nQuery: ${activeSnapshot.query}\nCaptured: ${capturedAt}\nSources:\n${sourcePreview}`;
+            }
+
+            function classifyWebFailureAttempt(webAttempt) {
+                const details = Array.isArray(webAttempt?.failureDetails) ? webAttempt.failureDetails : [];
+                const statusCodes = details
+                    .map((detail) => Number(detail?.statusCode) || 0)
+                    .filter((statusCode) => statusCode > 0);
+                const hasStatus = (statusCode) => statusCodes.includes(statusCode);
+                const has5xx = statusCodes.some((statusCode) => statusCode >= 500 && statusCode < 600);
+                const hasKind = (kind) => details.some((detail) => detail?.kind === kind);
+                const all403 = details.length > 0 && details.every((detail) => Number(detail?.statusCode) === 403);
+                const browserOffline = typeof navigator !== 'undefined' && navigator && navigator.onLine === false;
+
+                if (all403 || webAttempt?.allFailuresAre403) {
+                    return {
+                        kind: 'restricted',
+                        fallbackPrefix: 'Live search is restricted on this API key, so I answered from general knowledge.',
+                        failureLabel: 'live search is restricted on this key'
+                    };
+                }
+                if (hasStatus(429)) {
+                    return {
+                        kind: 'quota',
+                        fallbackPrefix: 'Live search quota is currently exhausted, so I answered from general knowledge.',
+                        failureLabel: 'live search quota is exhausted'
+                    };
+                }
+                if (browserOffline || hasKind('network_error')) {
+                    return {
+                        kind: 'offline',
+                        fallbackPrefix: 'Live search could not connect, so I answered from general knowledge.',
+                        failureLabel: 'live search could not connect'
+                    };
+                }
+                if (hasKind('request_timeout')) {
+                    return {
+                        kind: 'timeout',
+                        fallbackPrefix: 'Live search timed out, so I answered from general knowledge.',
+                        failureLabel: 'live search timed out'
+                    };
+                }
+                if (has5xx) {
+                    return {
+                        kind: 'provider',
+                        fallbackPrefix: 'Live search provider is temporarily unavailable, so I answered from general knowledge.',
+                        failureLabel: 'live search provider is temporarily unavailable'
+                    };
+                }
+                return {
+                    kind: 'provider',
+                    fallbackPrefix: 'Live search is unavailable right now, so I answered from general knowledge.',
+                    failureLabel: 'live search is unavailable right now'
+                };
             }
 
             function resetResponseMeta() {
@@ -1239,21 +1323,30 @@ export function initLegacyEngine() {
                         idx.className = 'source-index';
                         idx.textContent = String(index + 1);
 
+                        const body = document.createElement('div');
+                        body.className = 'source-body';
+
                         const title = document.createElement('span');
                         title.className = 'source-title';
                         title.textContent = source.title || source.uri;
 
+                        const meta = document.createElement('span');
+                        meta.className = 'source-meta';
+
                         const host = document.createElement('span');
                         host.className = 'source-host';
-                        try {
-                            host.textContent = new URL(source.uri).hostname;
-                        } catch (_) {
-                            host.textContent = source.uri;
-                        }
+                        host.textContent = source.domain || getSourceDomain(source.uri);
 
+                        const freshness = document.createElement('span');
+                        freshness.className = 'source-freshness';
+                        freshness.textContent = formatSourceFreshnessLabel(source.capturedAt || webSnapshot?.capturedAt);
+
+                        meta.appendChild(host);
+                        meta.appendChild(freshness);
+                        body.appendChild(title);
+                        body.appendChild(meta);
                         card.appendChild(idx);
-                        card.appendChild(title);
-                        card.appendChild(host);
+                        card.appendChild(body);
                         groundingSourcesContainer.appendChild(card);
                     });
 
@@ -3221,22 +3314,28 @@ export function initLegacyEngine() {
                     let lastFailureMessage = '';
                     const attemptedModelIds = [];
                     const failedModelReasons = [];
+                    const failureDetails = [];
                     let allFailuresAre403 = modelEntries.length > 0;
+                    const timeoutRetryLimit = requestUsesWebGrounding ? WEB_MAX_TIMEOUT_RETRIES : CHAT_MAX_TIMEOUT_RETRIES;
+                    const transientRetryLimit = requestUsesWebGrounding ? WEB_MAX_TRANSIENT_HTTP_RETRIES : CHAT_MAX_TRANSIENT_HTTP_RETRIES;
+                    const rateLimitRetryLimit = requestUsesWebGrounding ? WEB_MAX_RATE_LIMIT_RETRIES : CHAT_MAX_RATE_LIMIT_RETRIES;
+                    const requestTimeoutMs = requestUsesWebGrounding ? WEB_REQUEST_TIMEOUT_MS : CHAT_REQUEST_TIMEOUT_MS;
+                    const rateLimitRetryDelayMs = requestUsesWebGrounding ? WEB_RATE_LIMIT_RETRY_DELAY_MS : CHAT_RATE_LIMIT_RETRY_DELAY_MS;
 
                     for (const modelEntry of modelEntries) {
                         const modelConfig = normalizeModelConfig(modelEntry);
                         const modelId = modelConfig.id;
                         attemptedModelIds.push(modelId);
-                        let did429Retry = false;
                         let timeoutRetryCount = 0;
                         let transientStatusRetryCount = 0;
+                        let rateLimitRetryCount = 0;
 
                         while (true) {
                             trackEvent('chat_model_attempt_started', {
                                 uses_web_grounding: requestUsesWebGrounding,
                                 model_id: modelId,
                                 api_version: modelConfig.apiVersion,
-                                retry_index: did429Retry ? 1 : 0
+                                retry_index: timeoutRetryCount + transientStatusRetryCount + rateLimitRetryCount
                             });
 
                             try {
@@ -3254,12 +3353,16 @@ export function initLegacyEngine() {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify(attemptPayload)
-                                });
+                                }, requestTimeoutMs);
                                 if (!requestResult.ok) {
                                     allFailuresAre403 = false;
                                     const reason = String(requestResult.reason || 'network_error');
                                     lastFailureMessage = `${modelId} -> ${reason}`;
                                     failedModelReasons.push(`${modelId}: ${reason}`);
+                                    failureDetails.push({
+                                        modelId,
+                                        kind: reason
+                                    });
                                     trackEvent('chat_model_attempt_failed', {
                                         uses_web_grounding: requestUsesWebGrounding,
                                         model_id: modelId,
@@ -3268,7 +3371,7 @@ export function initLegacyEngine() {
                                         timed_out: reason === 'request_timeout'
                                     });
 
-                                    if ((reason === 'request_timeout' || reason === 'network_error') && timeoutRetryCount < CHAT_MAX_TIMEOUT_RETRIES) {
+                                    if ((reason === 'request_timeout' || reason === 'network_error') && timeoutRetryCount < timeoutRetryLimit) {
                                         timeoutRetryCount += 1;
                                         await waitForDelay(CHAT_RETRY_DELAY_MS * timeoutRetryCount);
                                         continue;
@@ -3282,6 +3385,11 @@ export function initLegacyEngine() {
                                     lastStatusCode = res.status;
                                     lastFailureMessage = `${modelId} -> HTTP ${res.status}`;
                                     failedModelReasons.push(`${modelId}: HTTP ${res.status}`);
+                                    failureDetails.push({
+                                        modelId,
+                                        kind: `http_${res.status}`,
+                                        statusCode: res.status
+                                    });
                                     trackEvent('chat_model_attempt_failed', {
                                         uses_web_grounding: requestUsesWebGrounding,
                                         model_id: modelId,
@@ -3297,15 +3405,15 @@ export function initLegacyEngine() {
                                         break;
                                     }
                                     if (res.status === 429) {
-                                        if (!did429Retry) {
-                                            did429Retry = true;
-                                            await waitForDelay(1500);
+                                        if (rateLimitRetryCount < rateLimitRetryLimit) {
+                                            rateLimitRetryCount += 1;
+                                            await waitForDelay(rateLimitRetryDelayMs * rateLimitRetryCount);
                                             continue;
                                         }
                                         break;
                                     }
                                     if ([408, 425, 500, 502, 503, 504].includes(res.status)) {
-                                        if (transientStatusRetryCount < CHAT_MAX_TRANSIENT_HTTP_RETRIES) {
+                                        if (transientStatusRetryCount < transientRetryLimit) {
                                             transientStatusRetryCount += 1;
                                             await waitForDelay(CHAT_RETRY_DELAY_MS * transientStatusRetryCount);
                                             continue;
@@ -3327,6 +3435,10 @@ export function initLegacyEngine() {
                                     allFailuresAre403 = false;
                                     lastFailureMessage = `${modelId} -> empty_response`;
                                     failedModelReasons.push(`${modelId}: empty response`);
+                                    failureDetails.push({
+                                        modelId,
+                                        kind: 'empty_response'
+                                    });
                                     trackEvent('chat_model_empty_response', {
                                         uses_web_grounding: requestUsesWebGrounding,
                                         model_id: modelId
@@ -3346,6 +3458,11 @@ export function initLegacyEngine() {
                                 const message = error instanceof Error ? error.message : String(error);
                                 lastFailureMessage = `${modelId} -> ${message}`;
                                 failedModelReasons.push(`${modelId}: ${message}`);
+                                failureDetails.push({
+                                    modelId,
+                                    kind: 'exception',
+                                    message
+                                });
                                 trackEvent('chat_model_attempt_failed', {
                                     uses_web_grounding: requestUsesWebGrounding,
                                     model_id: modelId,
@@ -3363,6 +3480,7 @@ export function initLegacyEngine() {
                         lastFailureMessage,
                         attemptedModelIds,
                         failedModelReasons,
+                        failureDetails,
                         allFailuresAre403
                     };
                 }
@@ -3378,28 +3496,33 @@ export function initLegacyEngine() {
                         model_id: webAttempt.modelId,
                         api_version: DEFAULT_MODEL_API_VERSION
                     });
+                    const webCaptureTime = Date.now();
                     if (shouldUpdateWebSnapshot) {
-                        updateWebSnapshot(query, webAttempt.text, webAttempt.topCandidate?.groundingMetadata);
-                        latestResponseMeta.groundedSources = extractGroundedSources(webAttempt.topCandidate?.groundingMetadata);
+                        const snapshot = updateWebSnapshot(query, webAttempt.text, webAttempt.topCandidate?.groundingMetadata);
+                        latestResponseMeta.groundedSources = snapshot?.sources || extractGroundedSources(webAttempt.topCandidate?.groundingMetadata, webCaptureTime);
                         trackEvent('web_snapshot_updated', {
                             source_count: latestResponseMeta.groundedSources.length
                         });
+                    } else {
+                        latestResponseMeta.groundedSources = extractGroundedSources(webAttempt.topCandidate?.groundingMetadata, webCaptureTime);
                     }
                     return webAttempt.text;
                 }
 
-                if (useWebGrounding && webAttempt?.allFailuresAre403) {
+                if (useWebGrounding) {
+                    const webFailure = classifyWebFailureAttempt(webAttempt);
                     const generalAttempt = await tryModelList(GENERAL_CHAT_MODELS, false);
                     if (generalAttempt.success) {
                         const prefixedResponse = dualReplyModeEnabled
-                            ? normalizeDualReplyText(`Search is currently restricted on this key, so this answer is from general knowledge.\n\n${generalAttempt.text}`, query)
-                            : `Live search is unavailable right now, so I answered from general knowledge.\n\n${generalAttempt.text}`;
+                            ? normalizeDualReplyText(`${webFailure.fallbackPrefix}\n\n${generalAttempt.text}`, query)
+                            : `${webFailure.fallbackPrefix}\n\n${generalAttempt.text}`;
                         persistModelReply(prefixedResponse);
                         trackEvent('chat_model_success', {
                             uses_web_grounding: false,
                             model_id: generalAttempt.modelId,
                             api_version: DEFAULT_MODEL_API_VERSION,
-                            source: 'web_fallback_to_general'
+                            source: 'web_fallback_to_general',
+                            web_failure_kind: webFailure.kind
                         });
                         return prefixedResponse;
                     }
@@ -3407,7 +3530,7 @@ export function initLegacyEngine() {
                         ...(webAttempt?.failedModelReasons || []),
                         ...(generalAttempt.failedModelReasons || [])
                     ];
-                    const fallbackTextBase = `Live search is unavailable right now, and normal chat is also unavailable. Please try again in a moment.`;
+                    const fallbackTextBase = `Live search failed because ${webFailure.failureLabel}, and normal chat is also unavailable. Please try again in a moment.`;
                     const fallbackText = dualReplyModeEnabled
                         ? normalizeDualReplyText(fallbackTextBase, query)
                         : fallbackTextBase;
@@ -3417,7 +3540,8 @@ export function initLegacyEngine() {
                         status_code: generalAttempt.lastStatusCode || webAttempt?.lastStatusCode || 0,
                         attempted_models: [...(webAttempt?.attemptedModelIds || []), ...generalAttempt.attemptedModelIds].join(','),
                         failed_model_reasons: combinedReasons.join(' | '),
-                        source: 'web_fallback_to_general'
+                        source: 'web_fallback_to_general',
+                        web_failure_kind: webFailure.kind
                     });
                     if (generalAttempt.lastFailureMessage || webAttempt?.lastFailureMessage) {
                         console.error("Chat request failed:", generalAttempt.lastFailureMessage || webAttempt?.lastFailureMessage);
@@ -3425,11 +3549,9 @@ export function initLegacyEngine() {
                     return fallbackText;
                 }
 
-                const failedModels = useWebGrounding ? (webAttempt?.failedModelReasons || []) : [];
-                const attemptedModels = useWebGrounding ? (webAttempt?.attemptedModelIds || []) : [];
-                const fallbackAttempt = useWebGrounding ? null : await tryModelList(GENERAL_CHAT_MODELS, false);
+                const fallbackAttempt = await tryModelList(GENERAL_CHAT_MODELS, false);
 
-                if (!useWebGrounding && fallbackAttempt?.success) {
+                if (fallbackAttempt?.success) {
                     persistModelReply(fallbackAttempt.text);
                     trackEvent('chat_model_success', {
                         uses_web_grounding: false,
@@ -3439,27 +3561,25 @@ export function initLegacyEngine() {
                     return fallbackAttempt.text;
                 }
 
-                const finalFailedModels = useWebGrounding ? failedModels : (fallbackAttempt?.failedModelReasons || []);
-                const finalAttemptedModels = useWebGrounding ? attemptedModels : (fallbackAttempt?.attemptedModelIds || []);
-                const finalStatusCode = useWebGrounding ? (webAttempt?.lastStatusCode || 0) : (fallbackAttempt?.lastStatusCode || 0);
-                const finalFailureMessage = useWebGrounding ? webAttempt?.lastFailureMessage : fallbackAttempt?.lastFailureMessage;
+                const finalFailedModels = fallbackAttempt?.failedModelReasons || [];
+                const finalAttemptedModels = fallbackAttempt?.attemptedModelIds || [];
+                const finalStatusCode = fallbackAttempt?.lastStatusCode || 0;
+                const finalFailureMessage = fallbackAttempt?.lastFailureMessage;
 
-                const finalFallbackTextBase = useWebGrounding
-                    ? `Live web lookup is temporarily unavailable right now. Try /web again in a bit, or continue with normal chat.`
-                    : `The AI model is temporarily unavailable right now. Please try again in a moment.`;
+                const finalFallbackTextBase = `The AI model is temporarily unavailable right now. Please try again in a moment.`;
                 const finalFallbackText = dualReplyModeEnabled
                     ? normalizeDualReplyText(finalFallbackTextBase, query)
                     : finalFallbackTextBase;
 
                 persistModelReply(finalFallbackText);
                 trackEvent('chat_model_failed', {
-                    uses_web_grounding: useWebGrounding,
+                    uses_web_grounding: false,
                     status_code: finalStatusCode,
                     attempted_models: finalAttemptedModels.join(','),
                     failed_model_reasons: finalFailedModels.join(' | ')
                 });
                 if (finalFailureMessage) {
-                    console.error(useWebGrounding ? "Grounded request failed:" : "Chat request failed:", finalFailureMessage);
+                    console.error("Chat request failed:", finalFailureMessage);
                 }
                 return finalFallbackText;
             }
