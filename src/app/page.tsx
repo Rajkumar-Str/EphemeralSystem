@@ -152,7 +152,7 @@ export default function Page() {
   }
 
   return (
-    <div className="w-screen h-screen relative overflow-hidden bg-[#020101] text-[#EAEAEA]">
+    <div className="app-shell w-screen h-screen relative overflow-hidden">
       <SystemCore />
       <MemoryCanvas />
       <SystemUI />

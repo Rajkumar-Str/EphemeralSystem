@@ -4,6 +4,7 @@ export default function SystemUI() {
   return (
     <>
         <div id="controls-container">
+            <div id="theme-indicator" className="sys-indicator">/theme</div>
             <div id="chats-indicator" className="sys-indicator">/chats</div>
             <div id="help-indicator" className="sys-indicator">/help</div>
         </div>
@@ -26,6 +27,10 @@ export default function SystemUI() {
                     <div className="overlay-item">
                         <div className="overlay-cmd" style={{textAlign: 'right'}}>/tone</div>
                         <div className="overlay-desc">Shift the system's operational persona.</div>
+                    </div>
+                    <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/theme</div>
+                        <div className="overlay-desc">Toggle dark/light visuals for readability.</div>
                     </div>
                     <div className="overlay-item">
                         <div className="overlay-cmd" style={{textAlign: 'right'}}>/dual</div>

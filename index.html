@@ -4,6 +4,23 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>System Ephemeral Core</title>
+    <script>
+      (function () {
+        var storageKey = 'ephemeral_theme_mode_v1';
+        var fallbackTheme = 'dark';
+        var nextTheme = fallbackTheme;
+        try {
+          var storedTheme = localStorage.getItem(storageKey);
+          if (storedTheme === 'light' || storedTheme === 'dark') {
+            nextTheme = storedTheme;
+          }
+        } catch (_) {
+          nextTheme = fallbackTheme;
+        }
+        document.documentElement.setAttribute('data-theme', nextTheme);
+        document.documentElement.style.colorScheme = nextTheme;
+      })();
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@100;300;400" rel="stylesheet">
 </head>

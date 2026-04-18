@@ -18,6 +18,7 @@ export function initLegacyEngine() {
             
             const helpIndicator = document.getElementById('help-indicator');
             const chatsIndicator = document.getElementById('chats-indicator');
+            const themeIndicator = document.getElementById('theme-indicator');
             
             const helpOverlay = document.getElementById('help-overlay');
             const toneOverlay = document.getElementById('tone-overlay');
@@ -80,6 +81,7 @@ export function initLegacyEngine() {
             const AUTH_RESET_COOLDOWN_STORAGE_KEY = 'ephemeral_auth_reset_cooldown_v1';
             const DUAL_REPLY_MODE_STORAGE_KEY = 'ephemeral_dual_reply_mode_v1';
             const COMMAND_MACROS_STORAGE_KEY = 'ephemeral_command_macros_v1';
+            const THEME_MODE_STORAGE_KEY = 'ephemeral_theme_mode_v1';
             const AUTH_RESET_BASE_COOLDOWN_MS = 30 * 1000;
             const AUTH_RESET_MAX_COOLDOWN_MS = 5 * 60 * 1000;
             const AUTH_RESET_BACKOFF_RESET_MS = 15 * 60 * 1000;
@@ -268,6 +270,7 @@ export function initLegacyEngine() {
             let authResetCooldownInterval = null;
             let dualReplyModeEnabled = false;
             let commandMacros = {};
+            let currentThemeMode = 'dark';
             let user = null;
             let archives = [];
             let memoryClearConfirmUntil = 0;
@@ -580,6 +583,104 @@ export function initLegacyEngine() {
                 return !!lightweightAnimationMode;
             }
 
+            function normalizeThemeMode(rawMode) {
+                const normalized = String(rawMode || '').trim().toLowerCase();
+                return normalized === 'light' ? 'light' : 'dark';
+            }
+
+            function getIndicatorIdleOpacity() {
+                return normalizeThemeMode(currentThemeMode) === 'light' ? '0.78' : '0.5';
+            }
+
+            function applyIndicatorIdleState(indicatorElement, labelText) {
+                if (!indicatorElement) return;
+                indicatorElement.innerText = labelText;
+                indicatorElement.style.opacity = getIndicatorIdleOpacity();
+                indicatorElement.style.removeProperty('color');
+            }
+
+            function refreshThemeIndicatorUI() {
+                if (!themeIndicator) return;
+                themeIndicator.innerText = '/theme';
+                themeIndicator.style.opacity = normalizeThemeMode(currentThemeMode) === 'light' ? '0.78' : '0.65';
+                themeIndicator.style.removeProperty('color');
+                themeIndicator.title = `Theme: ${currentThemeMode}. Click to toggle.`;
+                themeIndicator.dataset.themeMode = currentThemeMode;
+            }
+
+            function applyThemeMode(nextMode, options = {}) {
+                const normalizedMode = normalizeThemeMode(nextMode);
+                const persist = options.persist !== false;
+                const track = options.track !== false;
+                const source = String(options.source || 'runtime');
+                const previousMode = normalizeThemeMode(currentThemeMode);
+
+                currentThemeMode = normalizedMode;
+
+                if (typeof document !== 'undefined') {
+                    document.documentElement.setAttribute('data-theme', normalizedMode);
+                    document.documentElement.style.colorScheme = normalizedMode;
+                }
+
+                refreshThemeIndicatorUI();
+                if (helpIndicator && helpIndicator.innerText !== 'X') {
+                    applyIndicatorIdleState(helpIndicator, '/help');
+                }
+                if (chatsIndicator && chatsIndicator.innerText !== 'X') {
+                    applyIndicatorIdleState(chatsIndicator, '/chats');
+                }
+
+                if (persist && typeof window !== 'undefined') {
+                    try {
+                        localStorage.setItem(THEME_MODE_STORAGE_KEY, normalizedMode);
+                    } catch (_) {
+                        // Ignore theme persistence failures.
+                    }
+                }
+
+                if (track && previousMode !== normalizedMode) {
+                    trackEvent('theme_mode_changed', {
+                        theme_mode: normalizedMode,
+                        source
+                    });
+                }
+            }
+
+            function toggleThemeMode(source = 'command') {
+                const nextMode = normalizeThemeMode(currentThemeMode) === 'dark' ? 'light' : 'dark';
+                applyThemeMode(nextMode, {
+                    persist: true,
+                    track: true,
+                    source
+                });
+                return nextMode;
+            }
+
+            function readThemeModeState() {
+                const rootTheme = typeof document !== 'undefined'
+                    ? document.documentElement.getAttribute('data-theme')
+                    : '';
+                let storedTheme = '';
+                if (typeof window !== 'undefined') {
+                    try {
+                        storedTheme = localStorage.getItem(THEME_MODE_STORAGE_KEY) || '';
+                    } catch (_) {
+                        storedTheme = '';
+                    }
+                }
+                const initialMode = normalizeThemeMode(storedTheme || rootTheme || 'dark');
+                applyThemeMode(initialMode, {
+                    persist: false,
+                    track: false,
+                    source: 'bootstrap'
+                });
+            }
+
+            function formatThemeStatusText() {
+                const currentLabel = normalizeThemeMode(currentThemeMode) === 'light' ? 'Light' : 'Dark';
+                return `Theme mode: ${currentLabel}\nUse /theme to toggle, or /theme dark | /theme light`;
+            }
+
             function readDualReplyModeState() {
                 if (typeof window === 'undefined') return;
                 try {
@@ -626,7 +727,8 @@ export function initLegacyEngine() {
                     'webclear',
                     'dual',
                     'macro',
-                    'memory'
+                    'memory',
+                    'theme'
                 ]);
             }
 
@@ -2018,7 +2120,7 @@ export function initLegacyEngine() {
                 
                 const newChatItem = document.createElement('div');
                 newChatItem.className = 'overlay-item clickable';
-                newChatItem.innerHTML = `<div class="tone-cmd" style="color: #EAEAEA;">+ NEW CONNECTION</div>`;
+                newChatItem.innerHTML = `<div class="tone-cmd" style="color: var(--text-primary);">+ NEW CONNECTION</div>`;
                 newChatItem.onclick = () => { 
                     closeOverlays();
                     if (conversationHistory.length > 0) {
@@ -2032,7 +2134,7 @@ export function initLegacyEngine() {
                     const item = document.createElement('div');
                     item.className = 'overlay-item clickable';
                     const isActive = chat.id === currentChatId;
-                    const colorStyle = isActive ? 'color: #EAEAEA; text-shadow: 0 0 15px rgba(255,255,255,0.5);' : '';
+                    const colorStyle = isActive ? 'color: var(--text-primary); text-shadow: 0 0 15px rgba(var(--theme-rgb),0.45);' : '';
                     item.innerHTML = `<div class="overlay-cmd" style="${colorStyle}">${chat.title}</div>`;
                     item.onclick = () => { 
                         closeOverlays(); 
@@ -2054,6 +2156,7 @@ export function initLegacyEngine() {
             buildToneMenu();
             buildChatsMenu();
             hydrateChatFromLocalCache('app_boot');
+            readThemeModeState();
             readDualReplyModeState();
             readCommandMacrosState();
             readPasswordResetThrottleState();
@@ -2144,13 +2247,9 @@ export function initLegacyEngine() {
                 chatsOverlay.classList.remove('active');
                 if (authOverlay) authOverlay.classList.remove('active');
 
-                helpIndicator.innerText = '/help';
-                helpIndicator.style.opacity = '0.5';
-                helpIndicator.style.color = '#8B8B8B';
-
-                chatsIndicator.innerText = '/chats';
-                chatsIndicator.style.opacity = '0.5';
-                chatsIndicator.style.color = '#8B8B8B';
+                applyIndicatorIdleState(helpIndicator, '/help');
+                applyIndicatorIdleState(chatsIndicator, '/chats');
+                refreshThemeIndicatorUI();
             }
 
             helpIndicator.addEventListener('click', (e) => { 
@@ -2164,6 +2263,19 @@ export function initLegacyEngine() {
                 if (chatsOverlay.classList.contains('active')) closeOverlays();
                 else toggleOverlay(chatsOverlay, chatsIndicator);
             });
+
+            if (themeIndicator) {
+                themeIndicator.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const modeAfterToggle = toggleThemeMode('ui_indicator');
+                    statusText.textContent = `Theme: ${modeAfterToggle}`;
+                    setTimeout(() => {
+                        if (currentState === 'INPUT') {
+                            statusText.textContent = "System Awaiting";
+                        }
+                    }, 900);
+                });
+            }
 
             if (authSignInBtn) {
                 authSignInBtn.addEventListener('click', (e) => {
@@ -2386,7 +2498,6 @@ export function initLegacyEngine() {
 
                         const placeholder = document.createElement('div');
                         placeholder.className = 'history-item';
-                        placeholder.style.opacity = '0.4';
                         placeholder.textContent = msg.parts[0].text;
                         placeholder.dataset.response = aiText;
                         placeholder.dataset.fullText = msg.parts[0].text;
@@ -2450,6 +2561,43 @@ export function initLegacyEngine() {
                 if (queryText === '/help') { trackEvent('command_executed', { command_name: 'help' }); inputField.innerText = ''; toggleOverlay(helpOverlay, helpIndicator); return; }
                 if (queryText === '/tone') { trackEvent('command_executed', { command_name: 'tone' }); inputField.innerText = ''; toggleOverlay(toneOverlay); return; }
                 if (queryText === '/chats') { trackEvent('command_executed', { command_name: 'chats' }); inputField.innerText = ''; toggleOverlay(chatsOverlay, chatsIndicator); return; }
+                if (queryText === '/theme' || queryText === '/theme toggle') {
+                    trackEvent('command_executed', { command_name: 'theme_toggle' });
+                    inputField.innerText = '';
+                    const modeAfterToggle = toggleThemeMode('chat_command_toggle');
+                    await showCommandResponse(`Theme switched to ${modeAfterToggle}.`);
+                    return;
+                }
+                if (queryText === '/theme status') {
+                    trackEvent('command_executed', { command_name: 'theme_status' });
+                    inputField.innerText = '';
+                    await showCommandResponse(formatThemeStatusText());
+                    return;
+                }
+                if (queryText === '/theme dark' || queryText === '/theme light') {
+                    const requestedMode = queryText.endsWith('light') ? 'light' : 'dark';
+                    trackEvent('command_executed', {
+                        command_name: 'theme_set',
+                        theme_mode: requestedMode
+                    });
+                    inputField.innerText = '';
+                    const changed = normalizeThemeMode(currentThemeMode) !== requestedMode;
+                    applyThemeMode(requestedMode, {
+                        persist: true,
+                        track: changed,
+                        source: 'chat_command_set'
+                    });
+                    await showCommandResponse(changed
+                        ? `Theme switched to ${requestedMode}.`
+                        : `Theme is already ${requestedMode}.`);
+                    return;
+                }
+                if (queryText.startsWith('/theme ')) {
+                    trackEvent('command_executed', { command_name: 'theme_invalid' });
+                    inputField.innerText = '';
+                    await showCommandResponse('Usage: /theme, /theme dark, /theme light, or /theme status');
+                    return;
+                }
                 if (queryText === '/void') { trackEvent('command_executed', { command_name: 'void' }); executeVoidReset(); return; }
                 if (queryText === '/del') { 
                     if (currentChatId && window.deleteFromArchive) window.deleteFromArchive(currentChatId);
@@ -2782,7 +2930,7 @@ export function initLegacyEngine() {
                     if (activeClone) {
                         placeholder.style.transition = 'none';
                         placeholder.classList.remove('placeholder');
-                        placeholder.style.opacity = '0.6'; 
+                        placeholder.style.opacity = '';
                         void placeholder.offsetWidth;
                         placeholder.style.transition = '';
                         activeClone.remove();
