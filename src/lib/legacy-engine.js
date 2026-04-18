@@ -91,6 +91,18 @@ export function initLegacyEngine() {
             const CHAT_MAX_TRANSIENT_HTTP_RETRIES = 1;
             const DUAL_REPLY_MAX_QUICK_SENTENCES = 2;
             const COMMAND_MACRO_MAX_COUNT = 40;
+            const CHAT_LOCAL_CACHE_NAMESPACE = 'ephemeral_chat_cache_v1';
+            const CHAT_LOCAL_CACHE_INDEX_KEY = `${CHAT_LOCAL_CACHE_NAMESPACE}:index`;
+            const CHAT_LOCAL_ACTIVE_KEY = `${CHAT_LOCAL_CACHE_NAMESPACE}:active`;
+            const CHAT_LOCAL_CACHE_MAX_CHATS = 16;
+            const CHAT_LOCAL_CACHE_MAX_TURNS = 120;
+            const CHAT_PERSIST_MAX_TURNS = 180;
+            const CHAT_PERSIST_MAX_TEXT_LENGTH = 6000;
+            const MEMORY_CLEAR_CONFIRM_WINDOW_MS = 15000;
+            const CHAT_MEMORY_SCOPE = Object.freeze({
+                localCache: 'device + user + chat',
+                firestore: 'app + user + chat'
+            });
             const MATHBB_SYMBOL_MAP = Object.freeze({
                 N: 'ℕ',
                 Z: 'ℤ',
@@ -248,6 +260,287 @@ export function initLegacyEngine() {
             let authResetCooldownInterval = null;
             let dualReplyModeEnabled = false;
             let commandMacros = {};
+            let user = null;
+            let archives = [];
+            let memoryClearConfirmUntil = 0;
+
+            function getChatScopeUserId() {
+                return user?.uid || 'device-anon';
+            }
+
+            function getChatScopeChatId(chatId = currentChatId) {
+                const raw = String(chatId || '').trim();
+                return raw || 'active';
+            }
+
+            function getLocalChatCacheKey(chatId = currentChatId, userId = getChatScopeUserId()) {
+                const scopedUserId = String(userId || getChatScopeUserId() || 'device-anon');
+                const scopedChatId = getChatScopeChatId(chatId);
+                return `${CHAT_LOCAL_CACHE_NAMESPACE}:${appId}:${scopedUserId}:${scopedChatId}`;
+            }
+
+            function getLocalChatIndexKey(userId = getChatScopeUserId()) {
+                return `${CHAT_LOCAL_CACHE_INDEX_KEY}:${appId}:${String(userId || 'device-anon')}`;
+            }
+
+            function getLocalActiveChatKey(userId = getChatScopeUserId()) {
+                return `${CHAT_LOCAL_ACTIVE_KEY}:${appId}:${String(userId || 'device-anon')}`;
+            }
+
+            function safeLocalStorageGetJSON(storageKey, fallbackValue) {
+                if (typeof window === 'undefined') return fallbackValue;
+                try {
+                    const rawValue = localStorage.getItem(storageKey);
+                    if (!rawValue) return fallbackValue;
+                    return JSON.parse(rawValue);
+                } catch (_) {
+                    return fallbackValue;
+                }
+            }
+
+            function safeLocalStorageSetJSON(storageKey, value) {
+                if (typeof window === 'undefined') return false;
+                try {
+                    localStorage.setItem(storageKey, JSON.stringify(value));
+                    return true;
+                } catch (_) {
+                    return false;
+                }
+            }
+
+            function safeLocalStorageRemove(storageKey) {
+                if (typeof window === 'undefined') return;
+                try {
+                    localStorage.removeItem(storageKey);
+                } catch (_) {
+                    // Ignore storage remove failures.
+                }
+            }
+
+            function normalizeConversationHistory(historyValue) {
+                const source = Array.isArray(historyValue) ? historyValue : [];
+                const normalized = [];
+                for (const entry of source) {
+                    const role = entry?.role === 'model' ? 'model' : (entry?.role === 'user' ? 'user' : '');
+                    if (!role) continue;
+                    const rawText = String(entry?.parts?.[0]?.text || '').trim();
+                    if (!rawText) continue;
+                    normalized.push({
+                        role,
+                        parts: [{
+                            text: rawText.slice(0, CHAT_PERSIST_MAX_TEXT_LENGTH)
+                        }]
+                    });
+                }
+                return normalized;
+            }
+
+            function getPrunedHistoryForPersistence(historyValue, maxTurns = CHAT_PERSIST_MAX_TURNS) {
+                const normalized = normalizeConversationHistory(historyValue);
+                const cappedTurns = Math.max(1, Number(maxTurns) || 1);
+                if (normalized.length <= cappedTurns) return normalized;
+                return normalized.slice(-cappedTurns);
+            }
+
+            function buildChatTitleFromHistory(historyValue, fallbackTitle = 'Untitled chat') {
+                const normalized = normalizeConversationHistory(historyValue);
+                const firstUserMessage = normalized.find((entry) => entry.role === 'user');
+                const baseText = String(firstUserMessage?.parts?.[0]?.text || normalized[0]?.parts?.[0]?.text || fallbackTitle).trim();
+                if (!baseText) return fallbackTitle;
+                return baseText.length > 30 ? `${baseText.slice(0, 30)}...` : baseText;
+            }
+
+            function readLocalChatIndex(userId = getChatScopeUserId()) {
+                const parsed = safeLocalStorageGetJSON(getLocalChatIndexKey(userId), []);
+                if (!Array.isArray(parsed)) return [];
+                return parsed
+                    .map((entry) => {
+                        const id = String(entry?.id || '').trim();
+                        if (!id) return null;
+                        const title = String(entry?.title || 'Untitled chat').trim() || 'Untitled chat';
+                        const updatedAt = Number(entry?.updatedAt || 0);
+                        const messageCount = Number(entry?.messageCount || 0);
+                        return {
+                            id,
+                            title,
+                            updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
+                            messageCount: Number.isFinite(messageCount) ? messageCount : 0
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b.updatedAt - a.updatedAt)
+                    .slice(0, CHAT_LOCAL_CACHE_MAX_CHATS);
+            }
+
+            function writeLocalChatIndex(indexEntries, userId = getChatScopeUserId()) {
+                const safeEntries = Array.isArray(indexEntries) ? indexEntries : [];
+                const trimmed = safeEntries
+                    .map((entry) => ({
+                        id: String(entry?.id || '').trim(),
+                        title: String(entry?.title || 'Untitled chat').trim() || 'Untitled chat',
+                        updatedAt: Number(entry?.updatedAt || 0),
+                        messageCount: Number(entry?.messageCount || 0)
+                    }))
+                    .filter((entry) => !!entry.id)
+                    .sort((a, b) => b.updatedAt - a.updatedAt)
+                    .slice(0, CHAT_LOCAL_CACHE_MAX_CHATS);
+                safeLocalStorageSetJSON(getLocalChatIndexKey(userId), trimmed);
+            }
+
+            function setLocalActiveChatId(chatId, userId = getChatScopeUserId()) {
+                const normalizedChatId = String(chatId || '').trim();
+                if (!normalizedChatId) {
+                    safeLocalStorageRemove(getLocalActiveChatKey(userId));
+                    return;
+                }
+                safeLocalStorageSetJSON(getLocalActiveChatKey(userId), {
+                    chatId: normalizedChatId,
+                    updatedAt: Date.now()
+                });
+            }
+
+            function readLocalActiveChatId(userId = getChatScopeUserId()) {
+                const parsed = safeLocalStorageGetJSON(getLocalActiveChatKey(userId), null);
+                const chatId = String(parsed?.chatId || '').trim();
+                return chatId || '';
+            }
+
+            function readLocalChatCacheRecord(chatId, userId = getChatScopeUserId()) {
+                const normalizedChatId = String(chatId || '').trim();
+                if (!normalizedChatId) return null;
+                const parsed = safeLocalStorageGetJSON(getLocalChatCacheKey(normalizedChatId, userId), null);
+                if (!parsed || typeof parsed !== 'object') return null;
+                const history = normalizeConversationHistory(parsed.history);
+                if (history.length === 0) return null;
+                return {
+                    id: normalizedChatId,
+                    title: String(parsed.title || buildChatTitleFromHistory(history)).trim() || buildChatTitleFromHistory(history),
+                    updatedAt: Number(parsed.updatedAt || 0) || Date.now(),
+                    history
+                };
+            }
+
+            function removeLocalChatCacheRecord(chatId, userId = getChatScopeUserId()) {
+                const normalizedChatId = String(chatId || '').trim();
+                if (!normalizedChatId) return;
+                safeLocalStorageRemove(getLocalChatCacheKey(normalizedChatId, userId));
+                const nextIndex = readLocalChatIndex(userId).filter((entry) => entry.id !== normalizedChatId);
+                writeLocalChatIndex(nextIndex, userId);
+                if (readLocalActiveChatId(userId) === normalizedChatId) {
+                    setLocalActiveChatId(nextIndex[0]?.id || '', userId);
+                }
+            }
+
+            function persistLocalChatCacheRecord(chatId, historyValue, options = {}) {
+                const normalizedChatId = String(chatId || '').trim();
+                if (!normalizedChatId) return false;
+                const persistedHistory = getPrunedHistoryForPersistence(historyValue, CHAT_LOCAL_CACHE_MAX_TURNS);
+                if (persistedHistory.length === 0) return false;
+                const title = String(options.title || buildChatTitleFromHistory(persistedHistory)).trim() || buildChatTitleFromHistory(persistedHistory);
+                const updatedAt = Number(options.updatedAt || Date.now()) || Date.now();
+                const payload = {
+                    id: normalizedChatId,
+                    title,
+                    updatedAt,
+                    history: persistedHistory
+                };
+                if (!safeLocalStorageSetJSON(getLocalChatCacheKey(normalizedChatId, getChatScopeUserId()), payload)) return false;
+
+                const userId = getChatScopeUserId();
+                const index = readLocalChatIndex(userId).filter((entry) => entry.id !== normalizedChatId);
+                index.push({
+                    id: normalizedChatId,
+                    title,
+                    updatedAt,
+                    messageCount: persistedHistory.length
+                });
+                writeLocalChatIndex(index, userId);
+                setLocalActiveChatId(normalizedChatId, userId);
+                return true;
+            }
+
+            function syncLocalCacheFromArchives() {
+                const safeArchives = Array.isArray(archives) ? archives : [];
+                if (safeArchives.length === 0) return;
+                for (const chat of safeArchives.slice(0, CHAT_LOCAL_CACHE_MAX_CHATS)) {
+                    const chatId = String(chat?.id || '').trim();
+                    if (!chatId) continue;
+                    const history = getPrunedHistoryForPersistence(chat?.history || [], CHAT_LOCAL_CACHE_MAX_TURNS);
+                    if (history.length === 0) continue;
+                    persistLocalChatCacheRecord(chatId, history, {
+                        title: String(chat?.title || '').trim() || buildChatTitleFromHistory(history),
+                        updatedAt: Number(chat?.updatedAt || Date.now()) || Date.now()
+                    });
+                }
+            }
+
+            function persistCurrentChatToLocalCache(source = 'runtime') {
+                if (!currentChatId || !Array.isArray(conversationHistory) || conversationHistory.length === 0) return;
+                const titleFromArchive = archives.find((entry) => entry.id === currentChatId)?.title || '';
+                const saved = persistLocalChatCacheRecord(currentChatId, conversationHistory, {
+                    title: titleFromArchive || buildChatTitleFromHistory(conversationHistory),
+                    updatedAt: Date.now()
+                });
+                if (saved) {
+                    trackEvent('chat_local_cache_saved', {
+                        source: String(source || 'runtime'),
+                        message_count: Math.min(conversationHistory.length, CHAT_LOCAL_CACHE_MAX_TURNS)
+                    });
+                }
+            }
+
+            function clearCurrentUserLocalChatCache() {
+                const userId = getChatScopeUserId();
+                const index = readLocalChatIndex(userId);
+                for (const entry of index) {
+                    safeLocalStorageRemove(getLocalChatCacheKey(entry.id, userId));
+                }
+                safeLocalStorageRemove(getLocalChatIndexKey(userId));
+                safeLocalStorageRemove(getLocalActiveChatKey(userId));
+            }
+
+            function getCurrentMemoryStatus() {
+                const userId = getChatScopeUserId();
+                const index = readLocalChatIndex(userId);
+                const totalTurns = index.reduce((sum, entry) => sum + Math.max(0, Number(entry.messageCount || 0)), 0);
+                return {
+                    userId,
+                    chatCount: index.length,
+                    totalTurns,
+                    activeChatId: readLocalActiveChatId(userId) || (index[0]?.id || '')
+                };
+            }
+
+            function formatMemoryStatusText() {
+                const status = getCurrentMemoryStatus();
+                return [
+                    `Memory scope`,
+                    `Local cache: ${CHAT_MEMORY_SCOPE.localCache}`,
+                    `Cloud archive: ${CHAT_MEMORY_SCOPE.firestore}`,
+                    `Cached chats: ${status.chatCount}/${CHAT_LOCAL_CACHE_MAX_CHATS}`,
+                    `Cached turns: ${status.totalTurns}`,
+                    `Active chat: ${status.activeChatId || 'none'}`,
+                    `Commands: /memory status | /memory clear`
+                ].join('\n');
+            }
+
+            function hydrateChatFromLocalCache(source = 'startup') {
+                const userId = getChatScopeUserId();
+                const index = readLocalChatIndex(userId);
+                const preferredChatId = readLocalActiveChatId(userId) || index[0]?.id || '';
+                if (!preferredChatId) return false;
+                const record = readLocalChatCacheRecord(preferredChatId, userId);
+                if (!record) return false;
+                applyConversationHistory(record.id, record.history, {
+                    source: String(source || 'startup'),
+                    preserveReadingState: false
+                });
+                trackEvent('chat_local_cache_hydrated', {
+                    source: String(source || 'startup'),
+                    message_count: record.history.length
+                });
+                return true;
+            }
 
             function trackEvent(eventName, params = {}) {
                 try {
@@ -320,7 +613,8 @@ export function initLegacyEngine() {
                     'webstatus',
                     'webclear',
                     'dual',
-                    'macro'
+                    'macro',
+                    'memory'
                 ]);
             }
 
@@ -580,9 +874,6 @@ export function initLegacyEngine() {
             }
 
             // --- Persistent Storage (Firebase Initialization) ---
-            let user = null;
-            let archives = [];
-            
             try {
                 const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : fallbackFirebaseConfig;
                 if (firebaseConfig) {
@@ -628,6 +919,7 @@ export function initLegacyEngine() {
 
                     onAuthStateChanged(auth, (u) => {
                         user = u;
+                        const hydratedFromLocal = hydrateChatFromLocalCache('auth_state_changed');
                         trackEvent('auth_state_changed', {
                             auth_state: getAuthState(user)
                         });
@@ -643,6 +935,13 @@ export function initLegacyEngine() {
                                 archives = [];
                                 snapshot.forEach(d => archives.push({ id: d.id, ...d.data() }));
                                 archives.sort((a, b) => b.updatedAt - a.updatedAt);
+                                syncLocalCacheFromArchives();
+                                if (!currentChatId && !hydratedFromLocal && archives.length > 0) {
+                                    applyConversationHistory(archives[0].id, archives[0].history, {
+                                        source: 'firestore_bootstrap',
+                                        preserveReadingState: false
+                                    });
+                                }
                                 buildChatsMenu();
                                 trackEvent('chat_archive_synced', {
                                     archive_count: archives.length
@@ -657,16 +956,19 @@ export function initLegacyEngine() {
                     });
                     
                     window.saveToArchive = async function() {
-                        if (!user || !db || !currentChatId || conversationHistory.length === 0) return;
-                        let title = conversationHistory[0].parts[0].text.substring(0, 30);
-                        if (conversationHistory[0].parts[0].text.length > 30) title += '...';
-                        
+                        if (!currentChatId || conversationHistory.length === 0) return;
+                        const cleanHistory = getPrunedHistoryForPersistence(conversationHistory, CHAT_PERSIST_MAX_TURNS);
+                        if (cleanHistory.length === 0) return;
+                        let title = buildChatTitleFromHistory(cleanHistory);
                         const existing = archives.find(c => c.id === currentChatId);
                         if (existing && existing.title) title = existing.title;
+                        persistLocalChatCacheRecord(currentChatId, cleanHistory, {
+                            title,
+                            updatedAt: Date.now()
+                        });
+                        if (!user || !db) return;
 
                         const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chats', currentChatId);
-                        const cleanHistory = JSON.parse(JSON.stringify(conversationHistory));
-
                         await setDoc(chatRef, {
                             title,
                             history: cleanHistory,
@@ -678,8 +980,11 @@ export function initLegacyEngine() {
                     };
 
                     window.deleteFromArchive = async function(id) {
-                        if (!user || !db || !id) return;
-                        const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chats', id);
+                        const chatId = String(id || '').trim();
+                        if (!chatId) return;
+                        removeLocalChatCacheRecord(chatId);
+                        if (!user || !db) return;
+                        const chatRef = doc(db, 'artifacts', appId, 'users', user.uid, 'chats', chatId);
                         await deleteDoc(chatRef);
                         trackEvent('chat_archive_deleted');
                     };
@@ -1736,6 +2041,7 @@ export function initLegacyEngine() {
 
             buildToneMenu();
             buildChatsMenu();
+            hydrateChatFromLocalCache('app_boot');
             readDualReplyModeState();
             readCommandMacrosState();
             readPasswordResetThrottleState();
@@ -2044,31 +2350,27 @@ export function initLegacyEngine() {
 
             // --- Logic Execution ---
 
-            function loadArchivedChat(id) {
-                if (currentChatId === id) return;
-                const chat = archives.find(c => c.id === id);
-                if (!chat) return;
+            function applyConversationHistory(chatId, historyValue, options = {}) {
+                const normalizedChatId = String(chatId || '').trim();
+                const normalizedHistory = normalizeConversationHistory(historyValue);
+                if (!normalizedChatId || normalizedHistory.length === 0) return false;
 
-                currentChatId = id;
-                conversationHistory = chat.history;
-                trackEvent('chat_archive_opened', {
-                    message_count: Array.isArray(conversationHistory) ? conversationHistory.length : 0
-                });
+                currentChatId = normalizedChatId;
+                conversationHistory = normalizedHistory;
                 webSnapshot = null;
                 lastWebQuery = '';
 
-                // Fast clear
                 outputField.innerHTML = '';
-                
-                // Rebuild Stack
                 stack.innerHTML = '';
                 memoryCanvas.innerHTML = '';
 
                 for (let i = 0; i < conversationHistory.length; i++) {
                     const msg = conversationHistory[i];
                     if (msg.role === 'user') {
-                        const nextModelMsg = conversationHistory[i+1];
-                        const aiText = nextModelMsg && nextModelMsg.role === 'model' ? nextModelMsg.parts[0].text : "The void remains.";
+                        const nextModelMsg = conversationHistory[i + 1];
+                        const aiText = nextModelMsg && nextModelMsg.role === 'model'
+                            ? nextModelMsg.parts[0].text
+                            : "The void remains.";
 
                         const placeholder = document.createElement('div');
                         placeholder.className = 'history-item';
@@ -2077,13 +2379,57 @@ export function initLegacyEngine() {
                         placeholder.dataset.response = aiText;
                         placeholder.dataset.fullText = msg.parts[0].text;
                         stack.appendChild(placeholder);
-                        
+
                         commitToMemory(msg.parts[0].text, true);
                     }
                 }
+
                 stack.scrollTo({ top: stack.scrollHeight });
+                persistLocalChatCacheRecord(currentChatId, conversationHistory, {
+                    title: buildChatTitleFromHistory(conversationHistory),
+                    updatedAt: Date.now()
+                });
+                buildChatsMenu();
+                setLocalActiveChatId(currentChatId);
+
+                if (!options.preserveReadingState) {
+                    resetToInput();
+                }
+                return true;
+            }
+
+            function clearActiveConversationSession() {
+                conversationHistory = [];
+                currentChatId = null;
+                setLocalActiveChatId('');
+                webSnapshot = null;
+                lastWebQuery = '';
+                stack.innerHTML = '';
+                memoryCanvas.innerHTML = '';
                 buildChatsMenu();
                 resetToInput();
+            }
+
+            function loadArchivedChat(id) {
+                if (currentChatId === id) return;
+                let chat = archives.find(c => c.id === id);
+                if (!chat) {
+                    const localRecord = readLocalChatCacheRecord(id);
+                    if (localRecord) {
+                        chat = localRecord;
+                    }
+                }
+                if (!chat) return;
+
+                const applied = applyConversationHistory(chat.id, chat.history, {
+                    source: 'archive_open',
+                    preserveReadingState: false
+                });
+                if (!applied) return;
+
+                trackEvent('chat_archive_opened', {
+                    message_count: Array.isArray(conversationHistory) ? conversationHistory.length : 0
+                });
             }
 
             async function submitQuery(text) {
@@ -2232,6 +2578,38 @@ export function initLegacyEngine() {
                     await showCommandResponse('Usage: /macro list | /macro show <name> | /macro del <name> | /macro add <name> || <prompt> || <tone> || <format>');
                     return;
                 }
+                if (queryText === '/memory' || queryText === '/memory status') {
+                    trackEvent('command_executed', { command_name: 'memory_status' });
+                    inputField.innerText = '';
+                    await showCommandResponse(formatMemoryStatusText());
+                    return;
+                }
+                if (queryText === '/memory clear') {
+                    trackEvent('command_executed', { command_name: 'memory_clear_requested' });
+                    inputField.innerText = '';
+                    memoryClearConfirmUntil = Date.now() + MEMORY_CLEAR_CONFIRM_WINDOW_MS;
+                    await showCommandResponse('Confirm memory clear with: /memory clear confirm\nThis clears local cached chats for this account/device and resets the active session.\nCloud archives stay untouched.');
+                    return;
+                }
+                if (queryText === '/memory clear confirm') {
+                    trackEvent('command_executed', { command_name: 'memory_clear_confirm' });
+                    inputField.innerText = '';
+                    if (Date.now() > memoryClearConfirmUntil) {
+                        await showCommandResponse('Memory clear confirmation expired. Run /memory clear again.');
+                        return;
+                    }
+                    memoryClearConfirmUntil = 0;
+                    clearCurrentUserLocalChatCache();
+                    clearActiveConversationSession();
+                    await showCommandResponse('Local memory cache cleared and active session reset.');
+                    return;
+                }
+                if (queryText.startsWith('/memory ')) {
+                    trackEvent('command_executed', { command_name: 'memory_invalid' });
+                    inputField.innerText = '';
+                    await showCommandResponse('Usage: /memory status | /memory clear');
+                    return;
+                }
                 if (queryText === '/webstatus') {
                     trackEvent('command_executed', { command_name: 'webstatus' });
                     inputField.innerText = '';
@@ -2315,6 +2693,7 @@ export function initLegacyEngine() {
                 // Initialize a new chat session if none exists
                 if (!currentChatId) {
                     currentChatId = Date.now().toString();
+                    setLocalActiveChatId(currentChatId);
                     buildChatsMenu(); // show it in menu immediately
                     trackEvent('chat_session_created');
                 }
@@ -2417,6 +2796,7 @@ export function initLegacyEngine() {
                     const lastRole = conversationHistory[conversationHistory.length - 1]?.role;
                     if (lastRole !== 'model') {
                         conversationHistory.push({ role: "model", parts: [{ text: response }] });
+                        persistCurrentChatToLocalCache('pipeline_fallback_model');
                     }
                     trackEvent('chat_response_pipeline_failed', {
                         uses_web_grounding: useWebGrounding,
@@ -2489,6 +2869,7 @@ export function initLegacyEngine() {
                 setTimeout(() => {
                     conversationHistory = []; 
                     currentChatId = null;
+                    setLocalActiveChatId('');
                     webSnapshot = null;
                     lastWebQuery = '';
                     
@@ -2570,6 +2951,7 @@ export function initLegacyEngine() {
                 setTimeout(() => {
                     conversationHistory = []; 
                     currentChatId = null;
+                    setLocalActiveChatId('');
                     webSnapshot = null;
                     lastWebQuery = '';
                     
@@ -2619,6 +3001,7 @@ export function initLegacyEngine() {
                     const safeText = String(textValue || '').trim();
                     if (!safeText) return;
                     conversationHistory.push({ role: "model", parts: [{ text: safeText }] });
+                    persistCurrentChatToLocalCache('model_reply');
                     if (window.saveToArchive) {
                         window.saveToArchive().catch(e => {
                             trackEvent('chat_archive_save_failed');
@@ -2640,6 +3023,13 @@ export function initLegacyEngine() {
                     macro_name: macroName || 'none'
                 });
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
+                persistCurrentChatToLocalCache('user_turn');
+                if (window.saveToArchive) {
+                    window.saveToArchive().catch(e => {
+                        trackEvent('chat_archive_save_failed');
+                        console.error(e);
+                    });
+                }
                 conversationHistory = conversationHistory.filter((entry) => {
                     if (entry?.role !== 'model') return true;
                     const text = String(entry?.parts?.[0]?.text || '').trim();
