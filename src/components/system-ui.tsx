@@ -36,6 +36,14 @@ export default function SystemUI() {
                         <div className="overlay-desc">Enable or disable two-lane responses in one turn.</div>
                     </div>
                     <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/macro list</div>
+                        <div className="overlay-desc">Show all saved command macros.</div>
+                    </div>
+                    <div className="overlay-item">
+                        <div className="overlay-cmd" style={{textAlign: 'right'}}>/macro add</div>
+                        <div className="overlay-desc">Create a shortcut prompt with optional tone and format.</div>
+                    </div>
+                    <div className="overlay-item">
                         <div className="overlay-cmd" style={{textAlign: 'right'}}>/help</div>
                         <div className="overlay-desc">Reveal this index of directives.</div>
                     </div>

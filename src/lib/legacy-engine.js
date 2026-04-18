@@ -78,6 +78,7 @@ export function initLegacyEngine() {
             const WEB_SNAPSHOT_MAX_SOURCES = 3;
             const AUTH_RESET_COOLDOWN_STORAGE_KEY = 'ephemeral_auth_reset_cooldown_v1';
             const DUAL_REPLY_MODE_STORAGE_KEY = 'ephemeral_dual_reply_mode_v1';
+            const COMMAND_MACROS_STORAGE_KEY = 'ephemeral_command_macros_v1';
             const AUTH_RESET_BASE_COOLDOWN_MS = 30 * 1000;
             const AUTH_RESET_MAX_COOLDOWN_MS = 5 * 60 * 1000;
             const AUTH_RESET_BACKOFF_RESET_MS = 15 * 60 * 1000;
@@ -88,6 +89,7 @@ export function initLegacyEngine() {
             const CHAT_MAX_TIMEOUT_RETRIES = 1;
             const CHAT_MAX_TRANSIENT_HTTP_RETRIES = 1;
             const DUAL_REPLY_MAX_QUICK_SENTENCES = 2;
+            const COMMAND_MACRO_MAX_COUNT = 40;
             let webSnapshot = null;
             let lastWebQuery = '';
             let latestResponseMeta = {
@@ -106,6 +108,7 @@ export function initLegacyEngine() {
             let authResetLastAttemptAt = 0;
             let authResetCooldownInterval = null;
             let dualReplyModeEnabled = false;
+            let commandMacros = {};
 
             function trackEvent(eventName, params = {}) {
                 try {
@@ -146,6 +149,168 @@ export function initLegacyEngine() {
                 } catch (_) {
                     dualReplyModeEnabled = false;
                 }
+            }
+
+            function normalizeMacroName(rawName) {
+                const normalized = String(rawName || '')
+                    .trim()
+                    .replace(/^\/+/, '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9_-]/g, '');
+                return normalized;
+            }
+
+            function sanitizeMacroText(rawValue, maxLength = 1000) {
+                return String(rawValue || '')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .slice(0, Math.max(1, Number(maxLength) || 1));
+            }
+
+            function getReservedCommandNames() {
+                return new Set([
+                    'help',
+                    'tone',
+                    'chats',
+                    'void',
+                    'del',
+                    'auth',
+                    'profile',
+                    'web',
+                    'refreshweb',
+                    'webstatus',
+                    'webclear',
+                    'dual',
+                    'macro'
+                ]);
+            }
+
+            function isReservedCommandName(nameValue) {
+                return getReservedCommandNames().has(normalizeMacroName(nameValue));
+            }
+
+            function readCommandMacrosState() {
+                if (typeof window === 'undefined') return;
+                try {
+                    const raw = localStorage.getItem(COMMAND_MACROS_STORAGE_KEY);
+                    if (!raw) {
+                        commandMacros = {};
+                        return;
+                    }
+                    const parsed = JSON.parse(raw);
+                    if (!parsed || typeof parsed !== 'object') {
+                        commandMacros = {};
+                        return;
+                    }
+                    const next = {};
+                    for (const [rawName, rawValue] of Object.entries(parsed)) {
+                        const name = normalizeMacroName(rawName);
+                        if (!name || isReservedCommandName(name)) continue;
+                        if (!rawValue || typeof rawValue !== 'object') continue;
+                        const prompt = sanitizeMacroText(rawValue.prompt, 1200);
+                        const tone = sanitizeMacroText(rawValue.tone, 300);
+                        const format = sanitizeMacroText(rawValue.format, 300);
+                        if (!prompt) continue;
+                        next[name] = {
+                            prompt,
+                            tone,
+                            format,
+                            updatedAt: Number(rawValue.updatedAt || Date.now())
+                        };
+                        if (Object.keys(next).length >= COMMAND_MACRO_MAX_COUNT) break;
+                    }
+                    commandMacros = next;
+                } catch (_) {
+                    commandMacros = {};
+                }
+            }
+
+            function persistCommandMacrosState() {
+                if (typeof window === 'undefined') return;
+                try {
+                    localStorage.setItem(COMMAND_MACROS_STORAGE_KEY, JSON.stringify(commandMacros));
+                } catch (_) {
+                    // Ignore storage write failures.
+                }
+            }
+
+            function parseMacroAddPayload(rawPayload) {
+                const payload = String(rawPayload || '').trim();
+                const pieces = payload.split('||').map((part) => part.trim());
+                if (pieces.length < 2) {
+                    return {
+                        ok: false,
+                        error: 'Usage: /macro add <name> || <prompt> || <tone> || <format>'
+                    };
+                }
+                const name = normalizeMacroName(pieces[0]);
+                if (!name || name.length < 2) {
+                    return {
+                        ok: false,
+                        error: 'Macro name must be at least 2 characters and use letters, numbers, _ or -.'
+                    };
+                }
+                if (isReservedCommandName(name)) {
+                    return {
+                        ok: false,
+                        error: `/${name} is reserved. Pick another macro name.`
+                    };
+                }
+                const prompt = sanitizeMacroText(pieces[1], 1200);
+                if (!prompt) {
+                    return {
+                        ok: false,
+                        error: 'Macro prompt is required.'
+                    };
+                }
+                const tone = sanitizeMacroText(pieces[2] || '', 300);
+                const format = sanitizeMacroText(pieces[3] || '', 300);
+                return {
+                    ok: true,
+                    macro: {
+                        name,
+                        prompt,
+                        tone,
+                        format
+                    }
+                };
+            }
+
+            function formatMacroListText() {
+                const names = Object.keys(commandMacros).sort();
+                if (names.length === 0) {
+                    return 'No command macros saved. Add one with /macro add <name> || <prompt> || <tone> || <format>';
+                }
+                const lines = names.map((name) => {
+                    const macro = commandMacros[name];
+                    const promptPreview = macro.prompt.length > 70 ? `${macro.prompt.slice(0, 70)}...` : macro.prompt;
+                    const toneText = macro.tone || 'default';
+                    const formatText = macro.format || 'default';
+                    return `/${name} | tone: ${toneText} | format: ${formatText} | prompt: ${promptPreview}`;
+                });
+                return `Saved macros (${names.length}/${COMMAND_MACRO_MAX_COUNT}):\n${lines.join('\n')}`;
+            }
+
+            function formatMacroDetailsText(name) {
+                const normalizedName = normalizeMacroName(name);
+                const macro = commandMacros[normalizedName];
+                if (!macro) {
+                    return `Macro /${normalizedName || name} not found.`;
+                }
+                const toneText = macro.tone || 'default';
+                const formatText = macro.format || 'default';
+                return `Macro /${normalizedName}\nPrompt: ${macro.prompt}\nTone: ${toneText}\nFormat: ${formatText}`;
+            }
+
+            function buildMacroInstruction(macroName, macroConfig) {
+                if (!macroName || !macroConfig) return '';
+                const parts = [];
+                parts.push(`Active command macro: /${macroName}.`);
+                if (macroConfig.prompt) parts.push(`Macro objective: ${macroConfig.prompt}`);
+                if (macroConfig.tone) parts.push(`Preferred tone: ${macroConfig.tone}`);
+                if (macroConfig.format) parts.push(`Preferred output format: ${macroConfig.format}`);
+                parts.push('Apply these macro preferences for this reply while staying factual and safe.');
+                return parts.join(' ');
             }
 
             function persistDualReplyModeState() {
@@ -1301,6 +1466,7 @@ export function initLegacyEngine() {
             buildToneMenu();
             buildChatsMenu();
             readDualReplyModeState();
+            readCommandMacrosState();
             readPasswordResetThrottleState();
             if (getPasswordResetCooldownRemainingMs() > 0) {
                 startPasswordResetCooldownTicker();
@@ -1713,6 +1879,88 @@ export function initLegacyEngine() {
                     await showCommandResponse('Usage: /dual on, /dual off, or /dual status');
                     return;
                 }
+                if (queryText === '/macro' || queryText === '/macro help') {
+                    trackEvent('command_executed', { command_name: 'macro_help' });
+                    inputField.innerText = '';
+                    await showCommandResponse('Macro commands:\n/macro list\n/macro show <name>\n/macro del <name>\n/macro add <name> || <prompt> || <tone> || <format>\nThen run it with /<name> <optional request>');
+                    return;
+                }
+                if (queryText === '/macro list') {
+                    trackEvent('command_executed', { command_name: 'macro_list' });
+                    inputField.innerText = '';
+                    await showCommandResponse(formatMacroListText());
+                    return;
+                }
+                if (queryText.startsWith('/macro show ')) {
+                    const macroNameForShow = normalizeMacroName(rawText.substring('/macro show '.length));
+                    trackEvent('command_executed', {
+                        command_name: 'macro_show',
+                        macro_name: macroNameForShow || 'unknown'
+                    });
+                    inputField.innerText = '';
+                    if (!macroNameForShow) {
+                        await showCommandResponse('Usage: /macro show <name>');
+                        return;
+                    }
+                    await showCommandResponse(formatMacroDetailsText(macroNameForShow));
+                    return;
+                }
+                if (queryText.startsWith('/macro del ') || queryText.startsWith('/macro delete ') || queryText.startsWith('/macro remove ')) {
+                    const removePrefix = queryText.startsWith('/macro del ')
+                        ? '/macro del '
+                        : (queryText.startsWith('/macro delete ') ? '/macro delete ' : '/macro remove ');
+                    const macroNameForDelete = normalizeMacroName(rawText.substring(removePrefix.length));
+                    trackEvent('command_executed', {
+                        command_name: 'macro_delete',
+                        macro_name: macroNameForDelete || 'unknown'
+                    });
+                    inputField.innerText = '';
+                    if (!macroNameForDelete) {
+                        await showCommandResponse('Usage: /macro del <name>');
+                        return;
+                    }
+                    if (!commandMacros[macroNameForDelete]) {
+                        await showCommandResponse(`Macro /${macroNameForDelete} not found.`);
+                        return;
+                    }
+                    delete commandMacros[macroNameForDelete];
+                    persistCommandMacrosState();
+                    await showCommandResponse(`Deleted macro /${macroNameForDelete}.`);
+                    return;
+                }
+                if (queryText.startsWith('/macro add ')) {
+                    trackEvent('command_executed', { command_name: 'macro_add' });
+                    inputField.innerText = '';
+                    const parseResult = parseMacroAddPayload(rawText.substring('/macro add '.length));
+                    if (!parseResult.ok) {
+                        await showCommandResponse(parseResult.error);
+                        return;
+                    }
+                    const macro = parseResult.macro;
+                    const isNewMacro = !commandMacros[macro.name];
+                    if (isNewMacro && Object.keys(commandMacros).length >= COMMAND_MACRO_MAX_COUNT) {
+                        await showCommandResponse(`Macro limit reached (${COMMAND_MACRO_MAX_COUNT}). Delete one first with /macro del <name>.`);
+                        return;
+                    }
+                    commandMacros[macro.name] = {
+                        prompt: macro.prompt,
+                        tone: macro.tone,
+                        format: macro.format,
+                        updatedAt: Date.now()
+                    };
+                    persistCommandMacrosState();
+                    trackEvent('macro_saved', {
+                        macro_name: macro.name
+                    });
+                    await showCommandResponse(`Saved macro /${macro.name}. Run it with "/${macro.name}" or "/${macro.name} <your request>".`);
+                    return;
+                }
+                if (queryText.startsWith('/macro ')) {
+                    trackEvent('command_executed', { command_name: 'macro_invalid' });
+                    inputField.innerText = '';
+                    await showCommandResponse('Usage: /macro list | /macro show <name> | /macro del <name> | /macro add <name> || <prompt> || <tone> || <format>');
+                    return;
+                }
                 if (queryText === '/webstatus') {
                     trackEvent('command_executed', { command_name: 'webstatus' });
                     inputField.innerText = '';
@@ -1729,9 +1977,12 @@ export function initLegacyEngine() {
                 }
 
                 let promptText = rawText;
+                let modelPromptText = rawText;
                 let useWebGrounding = false;
                 let shouldUpdateWebSnapshot = false;
                 let usedRefreshWebCommand = false;
+                let macroName = '';
+                let macroContext = null;
 
                 if (queryText === '/web') {
                     trackEvent('command_executed', { command_name: 'web_invalid' });
@@ -1743,6 +1994,7 @@ export function initLegacyEngine() {
                 if (queryText.startsWith('/web ')) {
                     trackEvent('command_executed', { command_name: 'web' });
                     promptText = rawText.substring(5).trim();
+                    modelPromptText = promptText;
                     if (!promptText) {
                         inputField.innerText = '';
                         await showCommandResponse("Usage: /web <question>. Example: /web latest ai news today");
@@ -1758,6 +2010,7 @@ export function initLegacyEngine() {
                     const explicitRefreshPrompt = rawText.substring('/refreshweb'.length).trim();
                     const cachedPrompt = getActiveWebSnapshot()?.query || lastWebQuery;
                     promptText = explicitRefreshPrompt || cachedPrompt || '';
+                    modelPromptText = promptText;
                     if (!promptText) {
                         inputField.innerText = '';
                         await showCommandResponse("No previous web query found. Use /web <question> first, or /refreshweb <question>.");
@@ -1768,6 +2021,25 @@ export function initLegacyEngine() {
                     lastWebQuery = promptText;
                     usedRefreshWebCommand = true;
                 }
+                const macroInvocationMatch = rawText.match(/^\/([a-z0-9_-]+)(?:\s+([\s\S]*))?$/i);
+                if (macroInvocationMatch) {
+                    const maybeMacroName = normalizeMacroName(macroInvocationMatch[1]);
+                    const macroConfig = commandMacros[maybeMacroName];
+                    if (macroConfig) {
+                        const macroTail = String(macroInvocationMatch[2] || '').trim();
+                        macroName = maybeMacroName;
+                        macroContext = macroConfig;
+                        modelPromptText = sanitizeMacroText(macroTail || macroConfig.prompt, 1200);
+                        if (!modelPromptText) {
+                            modelPromptText = 'Continue with the macro defaults.';
+                        }
+                        trackEvent('command_executed', {
+                            command_name: 'macro_invoke',
+                            macro_name: macroName,
+                            has_tail_input: macroTail ? 1 : 0
+                        });
+                    }
+                }
 
                 // Initialize a new chat session if none exists
                 if (!currentChatId) {
@@ -1777,10 +2049,12 @@ export function initLegacyEngine() {
                 }
 
                 trackEvent('chat_prompt_submitted', {
-                    prompt_length: promptText.length,
+                    prompt_length: modelPromptText.length,
                     uses_web_grounding: useWebGrounding,
                     uses_refresh_command: usedRefreshWebCommand,
-                    dual_reply_mode: dualReplyModeEnabled
+                    dual_reply_mode: dualReplyModeEnabled,
+                    uses_macro: !!macroContext,
+                    macro_name: macroName || 'none'
                 });
 
                 currentState = 'PROCESSING';
@@ -1855,9 +2129,11 @@ export function initLegacyEngine() {
 
                 let response = '';
                 try {
-                    response = await callGeminiAPI(promptText, {
+                    response = await callGeminiAPI(modelPromptText, {
                         useWebGrounding,
-                        shouldUpdateWebSnapshot
+                        shouldUpdateWebSnapshot,
+                        macroName,
+                        macroContext
                     });
                 } catch (error) {
                     const failureMessage = String(error?.message || error || 'chat_pipeline_failed')
@@ -1865,7 +2141,7 @@ export function initLegacyEngine() {
                         .replace(/[^a-z0-9_./-]/g, '_');
                     const fallbackResponse = "The AI model is temporarily unavailable right now. Please try again in a moment.";
                     response = dualReplyModeEnabled
-                        ? normalizeDualReplyText(fallbackResponse, promptText)
+                        ? normalizeDualReplyText(fallbackResponse, modelPromptText)
                         : fallbackResponse;
                     const lastRole = conversationHistory[conversationHistory.length - 1]?.role;
                     if (lastRole !== 'model') {
@@ -2057,6 +2333,17 @@ export function initLegacyEngine() {
             async function callGeminiAPI(query, options = {}) {
                 const useWebGrounding = !!options.useWebGrounding;
                 const shouldUpdateWebSnapshot = !!options.shouldUpdateWebSnapshot;
+                const macroName = normalizeMacroName(options.macroName || '');
+                const rawMacroContext = options.macroContext && typeof options.macroContext === 'object'
+                    ? options.macroContext
+                    : null;
+                const macroContext = rawMacroContext
+                    ? {
+                        prompt: sanitizeMacroText(rawMacroContext.prompt, 1200),
+                        tone: sanitizeMacroText(rawMacroContext.tone, 300),
+                        format: sanitizeMacroText(rawMacroContext.format, 300)
+                    }
+                    : null;
                 const persistModelReply = (textValue) => {
                     const safeText = String(textValue || '').trim();
                     if (!safeText) return;
@@ -2077,7 +2364,9 @@ export function initLegacyEngine() {
                 trackEvent('chat_model_request_started', {
                     uses_web_grounding: useWebGrounding,
                     used_cached_snapshot: !!activeSnapshotForThisTurn,
-                    dual_reply_mode: dualReplyModeEnabled
+                    dual_reply_mode: dualReplyModeEnabled,
+                    uses_macro: !!macroContext,
+                    macro_name: macroName || 'none'
                 });
                 conversationHistory.push({ role: "user", parts: [{ text: query }] });
                 conversationHistory = conversationHistory.filter((entry) => {
@@ -2099,7 +2388,8 @@ export function initLegacyEngine() {
                 const dualReplyInstruction = dualReplyModeEnabled
                     ? 'Dual reply mode is enabled for this turn. Return exactly two lanes in this order with plain text labels only: "Quick: <1-2 short sentences>" then "Deep: <fuller explanation>". Do not add extra headings.'
                     : '';
-                const aiInstruction = `${baseInstruction} ${identityInstruction}${dualReplyInstruction ? ` ${dualReplyInstruction}` : ''} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.${webSnapshotInstruction ? `\n\n${webSnapshotInstruction}` : ''}`;
+                const macroInstruction = macroContext ? buildMacroInstruction(macroName, macroContext) : '';
+                const aiInstruction = `${baseInstruction} ${identityInstruction}${dualReplyInstruction ? ` ${dualReplyInstruction}` : ''}${macroInstruction ? ` ${macroInstruction}` : ''} The current local date and time for the user is ${currentDate}. Always use this if asked for the time or date.${webSnapshotInstruction ? `\n\n${webSnapshotInstruction}` : ''}`;
                 
                 const payload = {
                     contents: conversationHistory,
