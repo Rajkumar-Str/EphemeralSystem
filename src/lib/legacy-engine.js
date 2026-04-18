@@ -1329,26 +1329,101 @@ export function initLegacyEngine() {
                 }
             }
 
+            function splitIntoSentences(value) {
+                const source = String(value || '').trim();
+                if (!source) return [];
+                const matches = source.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g) || [];
+                return matches.map((part) => part.trim()).filter(Boolean);
+            }
+
+            function chunkSegments(segments, maxChars = 220, maxItems = 2) {
+                const chunks = [];
+                let current = [];
+                for (const segment of segments) {
+                    const clean = String(segment || '').trim();
+                    if (!clean) continue;
+                    const candidate = current.concat(clean).join(' ');
+                    if (current.length > 0 && (candidate.length > maxChars || current.length >= maxItems)) {
+                        chunks.push(current.join(' ').trim());
+                        current = [clean];
+                        continue;
+                    }
+                    current.push(clean);
+                }
+                if (current.length > 0) {
+                    chunks.push(current.join(' ').trim());
+                }
+                return chunks.filter(Boolean);
+            }
+
+            function normalizeInlineListBreaks(value) {
+                return String(value || '')
+                    .replace(/\s+(\d+\.)\s+/g, '\n$1 ')
+                    .replace(/\s+([a-z]\))\s+/gi, '\n$1 ')
+                    .replace(/\s+([-*])\s+/g, '\n$1 ');
+            }
+
             function formatResponseForDisplay(rawText) {
                 let text = String(rawText || '')
                     .replace(/\r\n/g, '\n')
                     .replace(/[ \t]+\n/g, '\n')
                     .replace(/\n{3,}/g, '\n\n')
                     .trim();
+                if (!text) return '';
 
-                // If the model returned a long block without line breaks, split by sentences.
-                if (!text.includes('\n') && text.length > 220) {
-                    text = text.replace(/([.!?])\s+(?=[A-Z0-9])/g, '$1\n');
+                text = normalizeInlineListBreaks(text);
+
+                const sourceParagraphs = text
+                    .split(/\n{2,}/)
+                    .map((part) => part.trim())
+                    .filter(Boolean);
+                const formattedParagraphs = [];
+
+                for (const paragraph of sourceParagraphs) {
+                    const lines = paragraph
+                        .split('\n')
+                        .map((line) => line.trim())
+                        .filter(Boolean);
+                    const hasListPrefix = lines.some((line) => /^(\d+\.|[a-z]\)|[-*])\s+/i.test(line));
+                    if (hasListPrefix) {
+                        const normalizedListLines = lines.map((line) => normalizeInlineListBreaks(line)).join('\n')
+                            .split('\n')
+                            .map((line) => line.trim())
+                            .filter(Boolean);
+                        formattedParagraphs.push(normalizedListLines.join('\n'));
+                        continue;
+                    }
+
+                    const cleanParagraph = lines.join(' ').replace(/\s+/g, ' ').trim();
+                    if (!cleanParagraph) continue;
+                    if (cleanParagraph.length <= 260) {
+                        formattedParagraphs.push(cleanParagraph);
+                        continue;
+                    }
+
+                    const sentences = splitIntoSentences(cleanParagraph);
+                    if (sentences.length >= 3) {
+                        formattedParagraphs.push(...chunkSegments(sentences, 220, 2));
+                        continue;
+                    }
+
+                    const commaSegments = cleanParagraph
+                        .split(/(?<=[,;:])\s+/)
+                        .map((segment) => segment.trim())
+                        .filter(Boolean);
+                    if (commaSegments.length >= 3) {
+                        formattedParagraphs.push(...chunkSegments(commaSegments, 190, 2));
+                        continue;
+                    }
+
+                    formattedParagraphs.push(cleanParagraph);
                 }
 
-                // Improve readability for inline numbered lists.
-                text = text
-                    .replace(/\s+(\d+\.)\s+/g, '\n$1 ')
-                    .replace(/\s+([-*•])\s+/g, '\n$1 ');
-
-                return text;
+                return formattedParagraphs
+                    .join('\n\n')
+                    .replace(/\n{3,}/g, '\n\n')
+                    .trim();
             }
-
             function buildSafeConversationalFallback(query) {
                 const normalized = String(query || '').trim().toLowerCase();
                 if (/^(hi|hey|hello|yo|sup|what'?s up)[!.?]*$/.test(normalized)) {
@@ -2771,3 +2846,4 @@ export function initLegacyEngine() {
             }
         
 }
+
